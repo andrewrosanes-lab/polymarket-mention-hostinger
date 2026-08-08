@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import sqlite3
 
 import pytest
 
@@ -37,10 +38,51 @@ def test_partial_exit_keeps_remaining_position_open(tmp_path):
     store = Store(str(tmp_path / "state.db"), str(tmp_path / "journal.jsonl"))
     store.record_position("c", "t", "YES", 4, .4, "o", "Question",
                           "2030-01-01T00:00:00+00:00", "0.01", False)
-    pnl = store.close_position("c", .5, "sell", 4)
+    position_id = store.open_positions()[0]["position_id"]
+    pnl = store.close_position(position_id, .5, "sell", 4)
     row = store.open_positions()[0]
     assert round(pnl, 4) == .4
     assert round(row["size_usd"], 4) == 2.4
+
+
+def test_repeated_condition_entries_remain_separate_and_counted(tmp_path):
+    store = Store(str(tmp_path / "state.db"), str(tmp_path / "journal.jsonl"))
+    for order in ("first", "second"):
+        store.record_position("c", "t", "YES", 3, .3, order, "Question",
+                              "2030-01-01T00:00:00+00:00", "0.01", False)
+    positions = store.open_positions()
+    assert len(positions) == 2
+    assert len({row["position_id"] for row in positions}) == 2
+    assert {row["order_id"] for row in positions} == {"first", "second"}
+
+
+def test_legacy_position_table_migrates_without_losing_open_trade(tmp_path):
+    database = tmp_path / "legacy.db"
+    db = sqlite3.connect(database)
+    db.execute(
+        """CREATE TABLE positions (
+          condition_id TEXT PRIMARY KEY, token_id TEXT NOT NULL,
+          side TEXT NOT NULL, size_usd REAL NOT NULL, entry_price REAL NOT NULL,
+          status TEXT NOT NULL, opened_at TEXT NOT NULL, order_id TEXT,
+          peak_price REAL NOT NULL DEFAULT 0, question TEXT NOT NULL DEFAULT '',
+          end_date TEXT, tick_size TEXT NOT NULL DEFAULT '0.01',
+          neg_risk INTEGER NOT NULL DEFAULT 0)"""
+    )
+    db.execute(
+        """INSERT INTO positions
+           VALUES ('c','t','YES',3,.3,'open','2026-08-08T00:00:00Z','old',
+                   .3,'Question','2030-01-01T00:00:00Z','0.01',0)"""
+    )
+    db.commit()
+    db.close()
+
+    store = Store(str(database), str(tmp_path / "journal.jsonl"))
+    legacy = store.open_positions()[0]
+    assert legacy["position_id"] > 0
+    assert legacy["condition_id"] == "c" and legacy["order_id"] == "old"
+    store.record_position("c", "t", "YES", 4, .4, "new", "Question",
+                          "2030-01-01T00:00:00Z", "0.01", False)
+    assert len(store.open_positions()) == 2
 
 
 def test_historical_observations_are_resolved_and_deduplicated(tmp_path):
@@ -139,11 +181,11 @@ def test_episode_metadata_and_subtitle_cleanup():
 def test_risk_uses_executable_ask_not_cached_gamma_price():
     engine = Engine.__new__(Engine)
     engine.cfg = {"risk": {"kill_switch_file": "/never", "max_open_positions": 5,
-        "max_deployed_usd": 20, "daily_loss_limit_usd": 10,
+        "daily_loss_limit_usd": 10,
         "min_liquidity_usd": 800, "min_volume_usd": 800, "max_spread_pct": 12,
-        "min_model_edge_pct": 6, "require_known_event_start": True,
-        "max_hours_before_event": 2, "min_entry_price": .16, "max_entry_price": .93,
-        "one_position_per_condition": True}}
+        "min_model_edge_pct": 6, "require_known_event_start": False,
+        "max_hours_before_event": 4, "min_entry_price": .16, "max_entry_price": .93,
+        "one_position_per_condition": False}}
     engine.store = type("S", (), {"open_positions": lambda self: [],
         "daily_loss": lambda self: 0, "has_condition": lambda self, c: False})()
     market = Market("c", "q", "e", "s", "es",

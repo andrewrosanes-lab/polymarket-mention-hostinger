@@ -51,7 +51,6 @@ tiers:
 risk:
   bankroll_usd: 100
   max_open_positions: 5
-  max_deployed_usd: 20
   daily_loss_limit_usd: 10
   max_entry_price: 0.93
   min_entry_price: 0.16
@@ -60,9 +59,9 @@ risk:
   max_spread_pct: 12
   min_model_edge_pct: 6
   min_cross_book_arb_pct: 6
-  max_hours_before_event: 2
-  require_known_event_start: true
-  one_position_per_condition: true
+  max_hours_before_event: 4
+  require_known_event_start: false
+  one_position_per_condition: false
   take_profit_pct: 30
   stop_loss_pct: 25
   low_price_stop_loss_pct: 50
@@ -109,8 +108,8 @@ execution:
   host: "https://clob.polymarket.com"
 
 # Gamma does not always publish the actual speech/kickoff time. Add ISO-8601
-# UTC overrides by event slug. With require_known_event_start=true, unknown
-# schedules are skipped instead of using the market resolution deadline.
+# Optional UTC overrides by event slug. Markets without a known event start are
+# still eligible; known starts must be no more than four hours away.
 scheduled_events: {}
 # Example:
 # scheduled_events:

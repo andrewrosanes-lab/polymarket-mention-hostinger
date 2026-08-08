@@ -62,7 +62,10 @@ but does not atomically execute both legs.
 - Minimum six-percentage-point modeled edge over the executable ask
 - At least $800 liquidity and $800 traded volume
 - Entry prices restricted to $0.16–$0.93
-- Entries only from two hours before the known event start through the live event
+- Entries with known starts only from four hours before the event through the
+  live event; markets without a published start time remain eligible
+- Multiple entries in the same market are tracked as separate positions and
+  still count against the five-position limit
 - Post-only GTC maker order first; cancel then FAK taker fallback after 20 seconds
 - Taker fallback slippage dynamically bounded between 1% and 3%
 - Entries from $0.16–$0.37 use both a 50% hard stop and 50% trailing drawdown

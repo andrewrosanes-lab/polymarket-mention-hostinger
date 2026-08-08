@@ -50,8 +50,6 @@ class Engine:
         r = self.cfg["risk"]
         if os.path.exists(r["kill_switch_file"]): return False, "kill switch"
         if len(self.store.open_positions()) >= r["max_open_positions"]: return False, "max positions"
-        deployed = sum(float(x["size_usd"]) for x in self.store.open_positions())
-        if deployed + score.size_usd > r["max_deployed_usd"]: return False, "max deployed"
         if self.store.daily_loss() <= -r["daily_loss_limit_usd"]: return False, "daily loss limit"
         if market.liquidity < r["min_liquidity_usd"]: return False, "low liquidity"
         if market.volume < r["min_volume_usd"]: return False, "low traded volume"
@@ -61,7 +59,9 @@ class Engine:
             if r["require_known_event_start"]: return False, "unknown event start"
         else:
             hours = (market.event_start - datetime.now(timezone.utc)).total_seconds()/3600
-            if hours > r["max_hours_before_event"]: return False, "more than 2 hours before event"
+            max_hours = float(r["max_hours_before_event"])
+            if hours > max_hours:
+                return False, f"more than {max_hours:g} hours before event"
         if not r["min_entry_price"] <= book.best_ask <= r["max_entry_price"]:
             return False, "executable entry price gate"
         if r["one_position_per_condition"] and self.store.has_condition(market.condition_id): return False, "already open"
@@ -128,7 +128,7 @@ class Engine:
                 if current <= 0:
                     continue
                 entry = float(position["entry_price"])
-                peak = self.store.update_peak(position["condition_id"], current)
+                peak = self.store.update_peak(position["position_id"], current)
                 gain = (current / entry - 1) * 100
                 end_date = market.end_date if market else None
                 if end_date is None and position["end_date"]:
@@ -154,7 +154,7 @@ class Engine:
                 neg_risk = market.neg_risk if market else bool(position["neg_risk"])
                 fill = self.executor.sell(position["token_id"], shares, current,
                                           tick_size, neg_risk)
-                pnl = self.store.close_position(position["condition_id"], fill.price,
+                pnl = self.store.close_position(position["position_id"], fill.price,
                                                 fill.order_id, fill.shares)
                 log.warning("CLOSE %s reason=%s pnl=$%.2f order=%s",
                             market.question if market else position["question"],
