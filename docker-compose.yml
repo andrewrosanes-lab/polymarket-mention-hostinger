@@ -9,12 +9,17 @@ services:
 
   mention-bot:
     build: ./bot
-    restart: "no"
-    command: ["python", "run.py", "--check"]
+    restart: unless-stopped
+    command: ["python", "run.py"]
     volumes:
       - mention_state:/app/state
     environment:
       PYTHONUNBUFFERED: "1"
+      POLYMARKET_PRIVATE_KEY: ${POLYMARKET_PRIVATE_KEY:?Set POLYMARKET_PRIVATE_KEY in Hostinger}
+      POLYMARKET_FUNDER_ADDRESS: ${POLYMARKET_FUNDER_ADDRESS:?Set POLYMARKET_FUNDER_ADDRESS in Hostinger}
+      CLOB_API_KEY: ${CLOB_API_KEY:-}
+      CLOB_SECRET: ${CLOB_SECRET:-}
+      CLOB_PASSPHRASE: ${CLOB_PASSPHRASE:-}
 
 volumes:
   mention_state:
