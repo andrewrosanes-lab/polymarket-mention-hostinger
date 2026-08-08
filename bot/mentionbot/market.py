@@ -145,6 +145,60 @@ class PolymarketData:
         ranked = sorted(found.values(), key=lambda m: (m.end_date, -m.liquidity))
         return ranked[: int(self.cfg.get("max_candidates_per_cycle", 25))]
 
+    def resolved_observations(self) -> list[dict]:
+        """Fetch deduplicated, definitively resolved mention outcomes from Gamma."""
+        historical = self.cfg.get("historical") or {}
+        if not historical.get("enabled", True):
+            return []
+        threshold = float(historical.get("resolution_confidence", 0.99))
+        max_events = int(historical.get("max_events_per_tag", 75))
+        found: dict[str, dict] = {}
+        for tag in self.cfg["discovery"].get("tag_ids", []):
+            cursor = None
+            event_count = 0
+            while event_count < max_events:
+                params = {"tag_id": int(tag["id"]), "closed": "true",
+                          "limit": min(100, max_events - event_count),
+                          "related_tags": "false"}
+                if cursor:
+                    params["after_cursor"] = cursor
+                response = self.session.get(f"{self.gamma}/events/keyset", params=params, timeout=30)
+                response.raise_for_status()
+                payload = response.json()
+                events = payload.get("events") or []
+                for event in events:
+                    event_count += 1
+                    text = f"{event.get('title', '')} {event.get('description', '')}"
+                    for raw in event.get("markets") or []:
+                        condition_id = str(raw.get("conditionId") or "")
+                        outcomes = [str(x).lower() for x in _json_list(raw.get("outcomes"))]
+                        prices = _json_list(raw.get("outcomePrices"))
+                        if not condition_id or len(outcomes) != 2 or len(prices) != 2:
+                            continue
+                        if "yes" not in outcomes or "no" not in outcomes:
+                            continue
+                        try:
+                            yes_price = float(prices[outcomes.index("yes")])
+                            no_price = float(prices[outcomes.index("no")])
+                        except (TypeError, ValueError):
+                            continue
+                        if yes_price >= threshold and no_price <= 1 - threshold:
+                            occurred = True
+                        elif no_price >= threshold and yes_price <= 1 - threshold:
+                            occurred = False
+                        else:
+                            continue
+                        question = str(raw.get("question") or "")
+                        subject, phrase = infer_subject_phrase(question)
+                        found[condition_id] = {"condition_id": condition_id,
+                            "subject": subject, "phrase": phrase,
+                            "context": infer_context(f"{question} {raw.get('description', '')} {text}"),
+                            "occurred": occurred}
+                cursor = payload.get("next_cursor")
+                if not events or not cursor:
+                    break
+        return list(found.values())
+
     def _parse(self, raw: dict) -> Market | None:
         outcomes, tokens, prices = map(_json_list, (raw.get("outcomes"), raw.get("clobTokenIds"), raw.get("outcomePrices")))
         if len(outcomes) != 2 or len(tokens) != 2 or len(prices) != 2:
