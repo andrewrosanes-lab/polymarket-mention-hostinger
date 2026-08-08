@@ -37,8 +37,8 @@ class Engine:
         else:
             hours = (market.event_start - datetime.now(timezone.utc)).total_seconds()/3600
             if hours > r["max_hours_before_event"]: return False, "more than 2 hours before event"
-        price = market.yes_price if score.side == "YES" else market.no_price
-        if not r["min_entry_price"] <= price <= r["max_entry_price"]: return False, "entry price gate"
+        if not r["min_entry_price"] <= book.best_ask <= r["max_entry_price"]:
+            return False, "executable entry price gate"
         if r["one_position_per_condition"] and self.store.has_condition(market.condition_id): return False, "already open"
         return True, "ok"
 
@@ -62,11 +62,12 @@ class Engine:
                 ok, reason = self.risk_ok(market, score, trade_book)
                 if not ok:
                     log.info("SKIP %s: %s", market.question, reason); continue
-                price = trade_book.best_ask
                 fill = self.executor.buy(market, score.side, score.size_usd, trade_book)
                 token = market.yes_token if score.side == "YES" else market.no_token
                 self.store.record_position(market.condition_id, token, score.side,
-                                           fill.size_usd, fill.price, fill.order_id)
+                                           fill.size_usd, fill.price, fill.order_id,
+                                           market.question, market.end_date.isoformat(),
+                                           market.tick_size, market.neg_risk)
                 log.warning("%s BUY %s tier=%s $%.2f @ %.3f order=%s",
                             self.cfg["mode"].upper(), score.side, score.tier,
                             fill.size_usd, fill.price, fill.order_id)
@@ -77,8 +78,6 @@ class Engine:
         r = self.cfg["risk"]
         for position in self.store.open_positions():
             market = markets.get(position["condition_id"])
-            if not market:
-                continue
             try:
                 book = self.data.book(position["token_id"])
                 current = book.best_bid
@@ -87,7 +86,11 @@ class Engine:
                 entry = float(position["entry_price"])
                 peak = self.store.update_peak(position["condition_id"], current)
                 gain = (current / entry - 1) * 100
-                minutes = (market.end_date - datetime.now(timezone.utc)).total_seconds() / 60
+                end_date = market.end_date if market else None
+                if end_date is None and position["end_date"]:
+                    end_date = datetime.fromisoformat(str(position["end_date"]).replace("Z", "+00:00"))
+                minutes = ((end_date - datetime.now(timezone.utc)).total_seconds() / 60
+                           if end_date else float("inf"))
                 reason = None
                 low_band = r["low_price_band_min"] <= entry <= r["low_price_band_max"]
                 low_stop = entry * (1 - r["low_price_stop_loss_pct"] / 100)
@@ -103,11 +106,15 @@ class Engine:
                 if not reason:
                     continue
                 shares = float(position["size_usd"]) / entry
+                tick_size = market.tick_size if market else str(position["tick_size"] or "0.01")
+                neg_risk = market.neg_risk if market else bool(position["neg_risk"])
                 fill = self.executor.sell(position["token_id"], shares, current,
-                                          market.tick_size, market.neg_risk)
-                pnl = self.store.close_position(position["condition_id"], fill.price, fill.order_id)
+                                          tick_size, neg_risk)
+                pnl = self.store.close_position(position["condition_id"], fill.price,
+                                                fill.order_id, fill.shares)
                 log.warning("CLOSE %s reason=%s pnl=$%.2f order=%s",
-                            market.question, reason, pnl, fill.order_id)
+                            market.question if market else position["question"],
+                            reason, pnl, fill.order_id)
             except Exception:
                 log.exception("position management failed: %s", position["condition_id"])
 
