@@ -23,7 +23,8 @@ def tier_for(confidence: float, tiers: list[dict]) -> tuple[str | None, float]:
 
 def combine(market: Market, yes_book: BookSignal, no_book: BookSignal,
             hist: float, news: float, momentum: float, cfg: dict,
-            news_count: int) -> Score:
+            news_count: int, history_scope: str = "exact",
+            history_samples: int = 0) -> Score:
     w = cfg["weights"]
     non_price_weight = (w["historical_context"] + w["order_book_imbalance"]
                         + w["news_live_impact"])
@@ -43,7 +44,8 @@ def combine(market: Market, yes_book: BookSignal, no_book: BookSignal,
     model_edge_pct = (model_probability - executable) * 100
     cross_book_arb_pct = (1 - yes_book.best_ask - no_book.best_ask) * 100
     tier, size = tier_for(confidence, cfg["tiers"])
-    explanation = (f"historical={hist:.1f}; book={yes_book.score:.1f}; news={news:.1f} "
+    explanation = (f"historical={hist:.1f} ({history_scope}, n={history_samples}); "
+                   f"book={yes_book.score:.1f}; news={news:.1f} "
                    f"({news_count} relevant); momentum={momentum:.1f}; pricing_edge={pricing_edge:.1f}; "
                    f"model_edge={model_edge_pct:.1f}%; cross_book_arb={cross_book_arb_pct:.1f}%")
     return Score(yes, confidence, side, tier, size, hist, yes_book.score, news,
