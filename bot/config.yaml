@@ -1,6 +1,6 @@
-# Live-only by design. The process stays locked until explicit owner approval.
+# Live-only deployment explicitly approved by the owner.
 mode: live
-allow_live_trading: false
+allow_live_trading: true
 
 poll_interval_sec: 60
 max_markets_per_scan: 300
