@@ -23,7 +23,8 @@ class NewsScorer:
         if not self.cfg["news"]["enabled"]:
             return 50.0, 0
         useful_subject = "" if subject.lower() in {"anyone", "unknown"} else subject
-        query = " ".join(x for x in (useful_subject, f'"{phrase}"', context.replace("_", " ")) if x)
+        phrase_query = " OR ".join(f'"{part}"' for part in phrase.split(" | "))
+        query = " ".join(x for x in (useful_subject, phrase_query, context.replace("_", " ")) if x)
         try:
             response = requests.get(self.cfg["news"]["rss_url"],
                 params={"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}, timeout=12)
@@ -42,7 +43,8 @@ class NewsScorer:
             age = max(0.0, (now - parsed).total_seconds() / 3600) if parsed else 999
             if age > self.cfg["news"]["lookback_hours"]:
                 continue
-            relevance = int(bool(useful_subject) and useful_subject.lower() in text) + int(phrase.lower() in text)
+            phrase_relevant = any(part.lower() in text for part in phrase.split(" | "))
+            relevance = int(bool(useful_subject) and useful_subject.lower() in text) + int(phrase_relevant)
             if not relevance:
                 continue
             count += 1

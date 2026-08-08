@@ -10,6 +10,8 @@ from .market import PolymarketData
 from .news import NewsScorer
 from .scoring import combine, historical_score
 from .storage import Store
+from .transcript_history import GovInfoHistory, market_history_shape
+from .subtitle_history import OpenSubtitlesHistory
 
 log = logging.getLogger(__name__)
 
@@ -20,6 +22,8 @@ class Engine:
         self.data, self.news = PolymarketData(cfg), NewsScorer(cfg)
         self.store = Store(cfg["paths"]["database"], cfg["paths"]["journal"])
         self.executor = build(cfg)
+        self.transcript_history = GovInfoHistory(cfg)
+        self.subtitle_history = OpenSubtitlesHistory(cfg)
         self._last_history_refresh = 0.0
 
     def refresh_history(self) -> None:
@@ -66,14 +70,30 @@ class Engine:
     def tick(self) -> None:
         self.refresh_history()
         markets = self.data.discover()
+        try:
+            documents, rows, mentions = self.transcript_history.refresh(markets, self.store)
+            if documents:
+                log.info("official GovInfo transcript refresh: documents=%d rows=%d mentions=%d",
+                         documents, rows, mentions)
+        except Exception:
+            log.exception("official GovInfo transcript refresh failed; retaining existing counts")
+        try:
+            downloads, rows, mentions = self.subtitle_history.refresh(markets, self.store)
+            if downloads:
+                log.info("OpenSubtitles historical refresh: episodes=%d rows=%d mentions=%d",
+                         downloads, rows, mentions)
+        except Exception:
+            log.exception("OpenSubtitles historical refresh failed; retaining existing history")
         self.manage_positions({market.condition_id: market for market in markets})
         log.info("discovered %d mention markets", len(markets))
         for market in markets:
             try:
                 book = self.data.book(market.yes_token)
                 no_book = self.data.book(market.no_token)
+                history_period, min_mentions = market_history_shape(market.question)
                 hits, total, history_scope = self.store.historical_pattern(
-                    market.subject, market.phrase, market.context)
+                    market.subject, market.phrase, market.context,
+                    history_period, min_mentions)
                 hist = historical_score(hits, total)
                 news, count = self.news.score(market.subject, market.phrase, market.context)
                 momentum = self.data.momentum(market.yes_token, market.yes_price)
