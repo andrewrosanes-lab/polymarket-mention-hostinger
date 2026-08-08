@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS positions (
   opened_at TEXT NOT NULL,
   order_id TEXT
   ,peak_price REAL NOT NULL DEFAULT 0
+  ,question TEXT NOT NULL DEFAULT ''
+  ,end_date TEXT
+  ,tick_size TEXT NOT NULL DEFAULT '0.01'
+  ,neg_risk INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS daily_pnl (
   day TEXT PRIMARY KEY,
@@ -40,9 +44,17 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(positions)")}
-        if "peak_price" not in columns:
-            self.db.execute("ALTER TABLE positions ADD COLUMN peak_price REAL NOT NULL DEFAULT 0")
-            self.db.commit()
+        migrations = {
+            "peak_price": "ALTER TABLE positions ADD COLUMN peak_price REAL NOT NULL DEFAULT 0",
+            "question": "ALTER TABLE positions ADD COLUMN question TEXT NOT NULL DEFAULT ''",
+            "end_date": "ALTER TABLE positions ADD COLUMN end_date TEXT",
+            "tick_size": "ALTER TABLE positions ADD COLUMN tick_size TEXT NOT NULL DEFAULT '0.01'",
+            "neg_risk": "ALTER TABLE positions ADD COLUMN neg_risk INTEGER NOT NULL DEFAULT 0",
+        }
+        for column, statement in migrations.items():
+            if column not in columns:
+                self.db.execute(statement)
+        self.db.commit()
 
     def historical(self, subject: str, phrase: str, context: str) -> tuple[int, int]:
         row = self.db.execute(
@@ -69,13 +81,17 @@ class Store:
         ).fetchone() is not None
 
     def record_position(self, condition_id: str, token_id: str, side: str,
-                        size: float, price: float, order_id: str | None) -> None:
+                        size: float, price: float, order_id: str | None,
+                        question: str, end_date: str, tick_size: str,
+                        neg_risk: bool) -> None:
         now = datetime.now(timezone.utc).isoformat()
         self.db.execute(
             """INSERT OR REPLACE INTO positions
-               (condition_id,token_id,side,size_usd,entry_price,status,opened_at,order_id,peak_price)
-               VALUES(?,?,?,?,?,'open',?,?,?)""",
-            (condition_id, token_id, side, size, price, now, order_id, price),
+               (condition_id,token_id,side,size_usd,entry_price,status,opened_at,
+                order_id,peak_price,question,end_date,tick_size,neg_risk)
+               VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?)""",
+            (condition_id, token_id, side, size, price, now, order_id, price,
+             question, end_date, tick_size, int(neg_risk)),
         )
         self.db.commit()
         Path(self.journal).parent.mkdir(parents=True, exist_ok=True)
@@ -98,14 +114,27 @@ class Store:
         row = self.db.execute("SELECT peak_price FROM positions WHERE condition_id=?", (condition_id,)).fetchone()
         return float(row[0]) if row else price
 
-    def close_position(self, condition_id: str, exit_price: float, order_id: str | None) -> float:
+    def close_position(self, condition_id: str, exit_price: float,
+                       order_id: str | None, shares_sold: float) -> float:
         row = self.db.execute("SELECT * FROM positions WHERE condition_id=? AND status='open'",
                               (condition_id,)).fetchone()
         if not row:
             return 0.0
-        shares = float(row["size_usd"]) / float(row["entry_price"])
-        pnl = shares * exit_price - float(row["size_usd"])
-        self.db.execute("UPDATE positions SET status='closed' WHERE condition_id=?", (condition_id,))
+        entry = float(row["entry_price"])
+        held_shares = float(row["size_usd"]) / entry
+        sold = max(0.0, min(float(shares_sold), held_shares))
+        if sold <= 0:
+            raise ValueError("cannot close a position without confirmed sold shares")
+        cost_basis = sold * entry
+        pnl = sold * exit_price - cost_basis
+        remaining_usd = max(0.0, float(row["size_usd"]) - cost_basis)
+        fully_closed = sold >= held_shares * 0.999
+        if fully_closed:
+            self.db.execute("UPDATE positions SET status='closed', size_usd=0 WHERE condition_id=?",
+                            (condition_id,))
+        else:
+            self.db.execute("UPDATE positions SET size_usd=? WHERE condition_id=? AND status='open'",
+                            (remaining_usd, condition_id))
         day = datetime.now(timezone.utc).date().isoformat()
         self.db.execute(
             """INSERT INTO daily_pnl(day,realized_usd) VALUES(?,?)
@@ -114,7 +143,9 @@ class Store:
         )
         self.db.commit()
         with open(self.journal, "a") as fh:
-            fh.write(json.dumps({"event": "CLOSE", "time": datetime.now(timezone.utc).isoformat(),
+            fh.write(json.dumps({"event": "CLOSE" if fully_closed else "PARTIAL_CLOSE",
+                                 "time": datetime.now(timezone.utc).isoformat(),
                                  "condition_id": condition_id, "exit_price": exit_price,
-                                 "pnl_usd": pnl, "order_id": order_id}) + "\n")
+                                 "shares_sold": sold, "pnl_usd": pnl,
+                                 "order_id": order_id}) + "\n")
         return pnl
