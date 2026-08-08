@@ -20,6 +20,29 @@ historical:
   max_events_per_tag: 75
   resolution_confidence: 0.99
 
+# Official U.S. Government transcripts. GovInfo explicitly publishes sitemaps
+# for automated harvesting. Only per-phrase counts and source metadata are
+# stored; transcript bodies are discarded after counting.
+transcript_history:
+  enabled: true
+  refresh_hours: 24
+  lookback_years: 2
+  max_documents: 120
+  request_delay_sec: 0.15
+  timeout_sec: 25
+  user_agent: "MentionEdge/1.0 (GovInfo transcript statistics)"
+
+# Optional historical television subtitles. Add OPENSUBTITLES_API_KEY only in
+# the VPS .env. These counts inform history but are never treated as the
+# official market-resolution source.
+subtitle_history:
+  enabled: true
+  refresh_hours: 24
+  max_prior_episodes: 12
+  max_downloads_per_refresh: 5
+  timeout_sec: 20
+  user_agent: "MentionEdge v1.0"
+
 tiers:
   - {name: C, min_confidence: 70, max_confidence: 80, size_usd: 3}
   - {name: B, min_confidence: 80, max_confidence: 90, size_usd: 4}

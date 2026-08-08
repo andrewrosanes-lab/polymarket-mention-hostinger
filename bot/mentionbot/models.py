@@ -24,6 +24,7 @@ class Market:
     subject: str
     phrase: str
     context: str
+    episode_target: object | None = None
 
 
 @dataclass(frozen=True)

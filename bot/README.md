@@ -8,7 +8,7 @@ with the weather bot.
 
 | Component | Weight | Method |
 |---|---:|---|
-| Context-matched historical mentions | 35% | Beta-smoothed hit rate for the same subject, phrase, and context |
+| Context-matched historical mentions | 35% | Beta-smoothed hit rate from official GovInfo presidential transcripts, with resolved Gamma markets as fallback |
 | Order-book imbalance | 20% | Bid versus ask notional near top-of-book |
 | News/live impact | 25% | Recent relevant Google News RSS headlines with time decay |
 | Market prior and momentum | 14% | Market probability plus one-day price movement |
@@ -27,6 +27,26 @@ trade.
 The news component is a transparent headline heuristic, not human-level news
 understanding. Historical data is segmented by context (`speech`, `debate`,
 `interview`, `press_conference`, `nfl_game`, or `other`).
+
+For Trump markets, the bot reads the official GovInfo Daily Compilation of
+Presidential Documents through GovInfo's harvesting sitemaps. It counts only
+paragraphs attributed to `The President`, stores the phrase count, title, and
+source URL in SQLite, and discards transcript text. The refresh is limited to
+the newest 120 qualifying documents over the last two years and runs at most
+once per phrase per day. GovInfo does not cover NFL or entertainment audio, so
+those markets continue to use resolved Gamma outcomes until a permitted
+transcript source is configured.
+
+Television markets can additionally learn from prior English subtitle files
+through the official OpenSubtitles REST API. Set `OPENSUBTITLES_API_KEY` only
+in the VPS `.env`; the key is optional and the bot retains Gamma history when
+it is absent or the service is unavailable. Subtitle counts are historical
+evidence only and are never represented as the official resolution source.
+
+Questions phrased as “this week” are evaluated by historical calendar week,
+not per transcript. Numeric wording such as “10+ times” is also preserved as a
+count threshold instead of being reduced to a simple mentioned/not-mentioned
+flag.
 
 “Pricing edge” is not guaranteed arbitrage. The bot separately reports gross
 cross-book arbitrage as `1 - YES ask - NO ask`. A real two-leg opportunity must

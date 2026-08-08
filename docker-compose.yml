@@ -20,6 +20,7 @@ services:
       CLOB_API_KEY: ${CLOB_API_KEY:-}
       CLOB_SECRET: ${CLOB_SECRET:-}
       CLOB_PASSPHRASE: ${CLOB_PASSPHRASE:-}
+      OPENSUBTITLES_API_KEY: ${OPENSUBTITLES_API_KEY:-}
 
 volumes:
   mention_state:

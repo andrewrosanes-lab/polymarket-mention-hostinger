@@ -32,7 +32,7 @@ def infer_context(text: str) -> str:
         "speech": ("speech", "rally", "remarks", "address"),
         "debate": ("debate",),
         "interview": ("interview", "podcast"),
-        "press_conference": ("press conference", "briefing"),
+        "press_conference": ("press conference", "news conference", "briefing"),
     }
     for context, words in groups.items():
         if any(w in lower for w in words):
@@ -51,7 +51,9 @@ def infer_subject_phrase(question: str) -> tuple[str, str]:
             break
     quoted = re.findall(r"[\"'“](.+?)[\"'”]", q)
     if quoted:
-        phrase = quoted[0]
+        # Preserve alternatives from questions such as '"Karoline" or
+        # "Leavitt"'. The transcript counter treats a pipe as logical OR.
+        phrase = " | ".join(dict.fromkeys(quoted))
     else:
         match = re.search(r"(?:say|mention|utter|use)\s+(.+?)(?:\s+during|\s+in|\s+at|$)", q, re.I)
         phrase = match.group(1).strip() if match else q
@@ -92,6 +94,7 @@ class PolymarketData:
             item["_event_slug"] = event.get("slug", "")
             item["_event_start"] = (event.get("eventStartTime") or event.get("startTime")
                                     or event.get("eventDate"))
+            item["_event_description"] = event.get("description", "")
             market = self._parse(item)
             if market:
                 found[market.condition_id] = market
@@ -214,16 +217,23 @@ class PolymarketData:
         event_slug = raw.get("_event_slug", "")
         override = (self.cfg.get("scheduled_events") or {}).get(event_slug)
         event_start = _date(override or raw.get("_event_start"))
+        # Import here to keep the transcript adapter optional and avoid a
+        # module cycle during basic market parsing tests.
+        from .subtitle_history import infer_episode_target
+        question = raw.get("question", "")
+        event_title = raw.get("_event_title") or (raw.get("events") or [{}])[0].get("title", "")
+        description = f"{raw.get('description', '')} {raw.get('_event_description', '')}"
         return Market(
-            condition_id=raw.get("conditionId", ""), question=raw.get("question", ""),
-            event_title=raw.get("_event_title") or (raw.get("events") or [{}])[0].get("title", ""),
+            condition_id=raw.get("conditionId", ""), question=question,
+            event_title=event_title,
             slug=raw.get("slug", ""), event_slug=event_slug, event_start=event_start,
             end_date=end, yes_token=str(tokens[yi]), no_token=str(tokens[ni]),
             yes_price=float(prices[yi]), no_price=float(prices[ni]),
             liquidity=float(raw.get("liquidityNum") or raw.get("liquidity") or 0),
             volume=float(raw.get("volumeNum") or raw.get("volume") or 0),
             neg_risk=bool(raw.get("negRisk", False)), tick_size=str(raw.get("orderPriceMinTickSize") or "0.01"),
-            subject=subject, phrase=phrase, context=infer_context(raw.get("question", "") + " " + str(raw.get("description", ""))),
+            subject=subject, phrase=phrase, context=infer_context(question + " " + description),
+            episode_target=infer_episode_target(question, event_title, description),
         )
 
     def book(self, token_id: str) -> BookSignal:

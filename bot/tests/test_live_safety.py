@@ -7,6 +7,9 @@ from mentionbot.execution import _response_fill
 from mentionbot.models import BookSignal, Market, Score
 from mentionbot.market import PolymarketData
 from mentionbot.storage import Store
+from mentionbot.transcript_history import (count_phrase, market_history_shape,
+                                           parse_govinfo_transcript)
+from mentionbot.subtitle_history import infer_episode_target, subtitle_text
 
 
 def test_confirmed_buy_and_sell_amounts():
@@ -73,6 +76,64 @@ def test_historical_observations_are_resolved_and_deduplicated(tmp_path):
     assert store.observation_count() == 2
     hits, total, scope = store.historical_pattern("Trump", "new phrase", "speech")
     assert total == 2 and hits == 1 and scope == "subject/context"
+
+
+def test_official_transcript_counts_only_president_and_overrides_gamma(tmp_path):
+    raw = """<html><body>
+      <p class="s1">Administration of Donald J. Trump, 2026</p>
+      <h1>Remarks and an Exchange With Reporters</h1>
+      <p class="s1">August 8, 2026</p>
+      <p class="s2">The President. Security is important.</p>
+      <p>We need security again.</p>
+      <p class="s2">Q. Will you discuss security?</p>
+      <p class="s2">Secretary Smith. Security.</p>
+      <p>More security from the Secretary.</p>
+      <p>NOTE: released later.</p>
+    </body></html>"""
+    transcript = parse_govinfo_transcript("DCPD-202600001", raw)
+    assert transcript is not None
+    assert count_phrase(transcript.president_text, "security") == 2
+
+    store = Store(str(tmp_path / "history.db"), str(tmp_path / "history.jsonl"))
+    store.add_observation("Trump", "security", "speech", False, "gamma")
+    store.add_transcript_mention("DCPD-202600001", "Trump", "security", "speech",
+                                 2, transcript.document_date, transcript.title,
+                                 transcript.source_url)
+    hits, total, scope = store.historical_pattern("Trump", "security", "speech")
+    assert (hits, total) == (1, 1)
+    assert scope == "official transcript phrase/context"
+
+
+def test_phrase_alternatives_are_counted_as_or():
+    assert count_phrase("Karoline spoke. Leavitt answered.", "Karoline | Leavitt") == 2
+
+
+def test_weekly_history_and_count_threshold_match_market_wording(tmp_path):
+    assert market_history_shape('Will Trump say "war" 5+ times this week?') == ("week", 5)
+    store = Store(str(tmp_path / "weekly.db"), str(tmp_path / "journal.jsonl"))
+    for doc, date, count in (("d1", "2026-08-03", 3), ("d2", "2026-08-04", 2),
+                             ("d3", "2026-07-27", 4)):
+        store.add_transcript_mention(doc, "Trump", "war", "speech", count,
+                                     date, "Remarks", f"https://example/{doc}")
+    hits, total, scope = store.historical_pattern(
+        "Trump", "war", "speech", period="week", min_mentions=5)
+    assert (hits, total) == (1, 2)
+    assert scope == "official transcript weekly phrase/context"
+
+
+def test_episode_metadata_and_subtitle_cleanup():
+    target = infer_episode_target(
+        'Will anyone say "Power" during Big Brother E17?',
+        'What will be said during Episode 17 of Big Brother?',
+        'Episode 17 of Big Brother Season 28 is scheduled to air.')
+    assert target and (target.series, target.season, target.episode) == (
+        "Big Brother", 28, 17)
+    target = infer_episode_target(
+        'Will anyone say "King" during House of the Dragon E8 S3?', '', '')
+    assert target and (target.series, target.season, target.episode) == (
+        "House of the Dragon", 3, 8)
+    raw = "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\n<b>Power</b> wins."
+    assert subtitle_text(raw) == "Power wins."
 
 
 def test_risk_uses_executable_ask_not_cached_gamma_price():

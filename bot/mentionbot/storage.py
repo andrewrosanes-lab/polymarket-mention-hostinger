@@ -35,6 +35,35 @@ CREATE TABLE IF NOT EXISTS daily_pnl (
   day TEXT PRIMARY KEY,
   realized_usd REAL NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS transcript_mentions (
+  document_id TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  phrase TEXT NOT NULL,
+  context TEXT NOT NULL,
+  mention_count INTEGER NOT NULL CHECK (mention_count >= 0),
+  document_date TEXT NOT NULL,
+  title TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  source_kind TEXT NOT NULL DEFAULT 'govinfo',
+  observed_at TEXT NOT NULL,
+  PRIMARY KEY (document_id, subject, phrase)
+);
+CREATE TABLE IF NOT EXISTS transcript_refreshes (
+  subject TEXT NOT NULL,
+  phrase TEXT NOT NULL,
+  refreshed_at TEXT NOT NULL,
+  documents_scanned INTEGER NOT NULL,
+  source_kind TEXT NOT NULL DEFAULT 'govinfo',
+  PRIMARY KEY (subject, phrase, source_kind)
+);
+CREATE TABLE IF NOT EXISTS transcript_source_refreshes (
+  subject TEXT NOT NULL,
+  phrase TEXT NOT NULL,
+  refreshed_at TEXT NOT NULL,
+  documents_scanned INTEGER NOT NULL,
+  source_kind TEXT NOT NULL,
+  PRIMARY KEY (subject, phrase, source_kind)
+);
 """
 
 
@@ -64,6 +93,16 @@ class Store:
             "ON observations(condition_id) WHERE condition_id IS NOT NULL"
         )
         self.db.commit()
+        transcript_columns = {row[1] for row in self.db.execute(
+            "PRAGMA table_info(transcript_mentions)")}
+        if "document_date" not in transcript_columns:
+            self.db.execute(
+                "ALTER TABLE transcript_mentions ADD COLUMN document_date TEXT NOT NULL DEFAULT ''")
+            self.db.commit()
+        if "source_kind" not in transcript_columns:
+            self.db.execute(
+                "ALTER TABLE transcript_mentions ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'govinfo'")
+            self.db.commit()
 
     def historical(self, subject: str, phrase: str, context: str) -> tuple[int, int]:
         row = self.db.execute(
@@ -75,7 +114,12 @@ class Store:
         return int(row["hits"]), int(row["n"])
 
     def historical_pattern(self, subject: str, phrase: str,
-                           context: str) -> tuple[int, int, str]:
+                           context: str, period: str = "event",
+                           min_mentions: int = 1) -> tuple[int, int, str]:
+        transcript = self.transcript_pattern(
+            subject, phrase, context, period, min_mentions)
+        if transcript[1]:
+            return transcript
         exact_hits, exact_total = self.historical(subject, phrase, context)
         if exact_total:
             return exact_hits, exact_total, "exact phrase/context"
@@ -99,6 +143,96 @@ class Store:
             if int(row["n"]):
                 return int(row["hits"]), int(row["n"]), scope
         return 0, 0, "neutral"
+
+    def transcript_pattern(self, subject: str, phrase: str,
+                           context: str, period: str = "event",
+                           min_mentions: int = 1) -> tuple[int, int, str]:
+        if subject.lower() == "unknown":
+            return 0, 0, "neutral"
+        for base_scope, where, params in (
+            ("official transcript phrase/context",
+             "lower(subject)=lower(?) AND lower(phrase)=lower(?) AND lower(context)=lower(?)",
+             (subject, phrase, context)),
+            ("official transcript phrase",
+             "lower(subject)=lower(?) AND lower(phrase)=lower(?)", (subject, phrase)),
+        ):
+            if period == "week":
+                row = self.db.execute(
+                    f"""SELECT COUNT(*) n,
+                        COALESCE(SUM(CASE WHEN period_mentions >= ? THEN 1 ELSE 0 END),0) hits
+                        FROM (
+                          SELECT strftime('%Y-%W', document_date) period_key,
+                                 SUM(mention_count) period_mentions
+                          FROM transcript_mentions WHERE {where} AND document_date != ''
+                          GROUP BY period_key
+                        )""",
+                    (int(min_mentions), *params),
+                ).fetchone()
+                scope = base_scope.replace("official transcript", "official transcript weekly")
+            else:
+                row = self.db.execute(
+                    f"""SELECT COUNT(*) n,
+                        COALESCE(SUM(CASE WHEN mention_count >= ? THEN 1 ELSE 0 END),0) hits
+                        FROM transcript_mentions WHERE {where}""",
+                    (int(min_mentions), *params),
+                ).fetchone()
+                scope = base_scope
+            if int(row["n"]):
+                kinds = self.db.execute(
+                    f"SELECT GROUP_CONCAT(DISTINCT source_kind) kinds "
+                    f"FROM transcript_mentions WHERE {where}", params,
+                ).fetchone()[0] or ""
+                if kinds == "opensubtitles":
+                    scope = scope.replace("official transcript", "third-party subtitle")
+                return int(row["hits"]), int(row["n"]), scope
+        return 0, 0, "neutral"
+
+    def add_transcript_mention(self, document_id: str, subject: str, phrase: str,
+                               context: str, mention_count: int,
+                               document_date: str, title: str,
+                               source_url: str, source_kind: str = "govinfo") -> bool:
+        cursor = self.db.execute(
+            """INSERT OR REPLACE INTO transcript_mentions
+               (document_id,subject,phrase,context,mention_count,document_date,title,source_url,observed_at,source_kind)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (document_id, subject, phrase, context, int(mention_count), document_date,
+             title, source_url, datetime.now(timezone.utc).isoformat(), source_kind),
+        )
+        self.db.commit()
+        return cursor.rowcount == 1
+
+    def transcript_refresh_due(self, subject: str, phrase: str,
+                               refresh_hours: float,
+                               source_kind: str = "govinfo") -> bool:
+        row = self.db.execute(
+            """SELECT refreshed_at FROM transcript_source_refreshes
+               WHERE lower(subject)=lower(?) AND lower(phrase)=lower(?)
+               AND source_kind=?""",
+            (subject, phrase, source_kind),
+        ).fetchone()
+        if not row:
+            return True
+        try:
+            refreshed = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        age = (datetime.now(timezone.utc) - refreshed).total_seconds()
+        return age >= refresh_hours * 3600
+
+    def mark_transcript_refreshed(self, subject: str, phrase: str,
+                                  documents_scanned: int,
+                                  source_kind: str = "govinfo") -> None:
+        self.db.execute(
+            """INSERT INTO transcript_source_refreshes
+               (subject,phrase,refreshed_at,documents_scanned,source_kind)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(subject,phrase,source_kind) DO UPDATE SET
+                 refreshed_at=excluded.refreshed_at,
+                 documents_scanned=excluded.documents_scanned""",
+            (subject, phrase, datetime.now(timezone.utc).isoformat(),
+             documents_scanned, source_kind),
+        )
+        self.db.commit()
 
     def add_observation(self, subject: str, phrase: str, context: str,
                         occurred: bool, condition_id: str | None = None) -> bool:
