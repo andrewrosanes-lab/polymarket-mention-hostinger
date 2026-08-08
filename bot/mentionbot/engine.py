@@ -20,6 +20,27 @@ class Engine:
         self.data, self.news = PolymarketData(cfg), NewsScorer(cfg)
         self.store = Store(cfg["paths"]["database"], cfg["paths"]["journal"])
         self.executor = build(cfg)
+        self._last_history_refresh = 0.0
+
+    def refresh_history(self) -> None:
+        historical = self.cfg.get("historical") or {}
+        if not historical.get("enabled", True):
+            return
+        interval = float(historical.get("refresh_hours", 6)) * 3600
+        if self._last_history_refresh and time.monotonic() - self._last_history_refresh < interval:
+            return
+        try:
+            learned = 0
+            for item in self.data.resolved_observations():
+                learned += self.store.add_observation(
+                    item["subject"], item["phrase"], item["context"],
+                    item["occurred"], item["condition_id"]
+                )
+            self._last_history_refresh = time.monotonic()
+            log.info("historical Gamma refresh: learned=%d total=%d",
+                     learned, self.store.observation_count())
+        except Exception:
+            log.exception("historical Gamma refresh failed; retaining existing history")
 
     def risk_ok(self, market, score, book) -> tuple[bool, str]:
         r = self.cfg["risk"]
@@ -43,6 +64,7 @@ class Engine:
         return True, "ok"
 
     def tick(self) -> None:
+        self.refresh_history()
         markets = self.data.discover()
         self.manage_positions({market.condition_id: market for market in markets})
         log.info("discovered %d mention markets", len(markets))
@@ -50,11 +72,13 @@ class Engine:
             try:
                 book = self.data.book(market.yes_token)
                 no_book = self.data.book(market.no_token)
-                hits, total = self.store.historical(market.subject, market.phrase, market.context)
+                hits, total, history_scope = self.store.historical_pattern(
+                    market.subject, market.phrase, market.context)
                 hist = historical_score(hits, total)
                 news, count = self.news.score(market.subject, market.phrase, market.context)
                 momentum = self.data.momentum(market.yes_token, market.yes_price)
-                score = combine(market, book, no_book, hist, news, momentum, self.cfg, count)
+                score = combine(market, book, no_book, hist, news, momentum,
+                                self.cfg, count, history_scope, total)
                 log.info("%s | %s %.1f | %s", market.question, score.side, score.confidence, score.explanation)
                 if score.confidence < self.cfg["minimum_confidence"] or not score.tier:
                     continue
