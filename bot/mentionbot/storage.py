@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS observations (
   phrase TEXT NOT NULL,
   context TEXT NOT NULL,
   occurred INTEGER NOT NULL CHECK (occurred IN (0,1)),
-  observed_at TEXT NOT NULL
+  observed_at TEXT NOT NULL,
+  condition_id TEXT
 );
 CREATE TABLE IF NOT EXISTS positions (
   condition_id TEXT PRIMARY KEY,
@@ -55,6 +56,14 @@ class Store:
             if column not in columns:
                 self.db.execute(statement)
         self.db.commit()
+        observation_columns = {row[1] for row in self.db.execute("PRAGMA table_info(observations)")}
+        if "condition_id" not in observation_columns:
+            self.db.execute("ALTER TABLE observations ADD COLUMN condition_id TEXT")
+        self.db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS observations_condition_id_uq "
+            "ON observations(condition_id) WHERE condition_id IS NOT NULL"
+        )
+        self.db.commit()
 
     def historical(self, subject: str, phrase: str, context: str) -> tuple[int, int]:
         row = self.db.execute(
@@ -65,12 +74,46 @@ class Store:
         ).fetchone()
         return int(row["hits"]), int(row["n"])
 
-    def add_observation(self, subject: str, phrase: str, context: str, occurred: bool) -> None:
-        self.db.execute(
-            "INSERT INTO observations(subject,phrase,context,occurred,observed_at) VALUES(?,?,?,?,?)",
-            (subject, phrase, context, int(occurred), datetime.now(timezone.utc).isoformat()),
+    def historical_pattern(self, subject: str, phrase: str,
+                           context: str) -> tuple[int, int, str]:
+        exact_hits, exact_total = self.historical(subject, phrase, context)
+        if exact_total:
+            return exact_hits, exact_total, "exact phrase/context"
+        useful_subject = subject.lower() not in {"anyone", "unknown"}
+        queries = []
+        if useful_subject:
+            queries.extend([
+                ("subject/context", "lower(subject)=lower(?) AND lower(context)=lower(?)",
+                 (subject, context)),
+                ("subject", "lower(subject)=lower(?)", (subject,)),
+            ])
+        queries.extend([
+            ("context", "lower(context)=lower(?)", (context,)),
+            ("global", "1=1", ()),
+        ])
+        for scope, where, params in queries:
+            row = self.db.execute(
+                f"SELECT COUNT(*) n, COALESCE(SUM(occurred),0) hits FROM observations WHERE {where}",
+                params,
+            ).fetchone()
+            if int(row["n"]):
+                return int(row["hits"]), int(row["n"]), scope
+        return 0, 0, "neutral"
+
+    def add_observation(self, subject: str, phrase: str, context: str,
+                        occurred: bool, condition_id: str | None = None) -> bool:
+        cursor = self.db.execute(
+            """INSERT OR IGNORE INTO observations
+               (subject,phrase,context,occurred,observed_at,condition_id)
+               VALUES(?,?,?,?,?,?)""",
+            (subject, phrase, context, int(occurred),
+             datetime.now(timezone.utc).isoformat(), condition_id),
         )
         self.db.commit()
+        return cursor.rowcount == 1
+
+    def observation_count(self) -> int:
+        return int(self.db.execute("SELECT COUNT(*) FROM observations").fetchone()[0])
 
     def open_positions(self) -> list[sqlite3.Row]:
         return list(self.db.execute("SELECT * FROM positions WHERE status='open'"))
