@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS observations (
   condition_id TEXT
 );
 CREATE TABLE IF NOT EXISTS positions (
-  condition_id TEXT PRIMARY KEY,
+  position_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  condition_id TEXT NOT NULL,
   token_id TEXT NOT NULL,
   side TEXT NOT NULL,
   size_usd REAL NOT NULL,
@@ -85,6 +86,14 @@ class Store:
             if column not in columns:
                 self.db.execute(statement)
         self.db.commit()
+        position_columns = {row[1] for row in self.db.execute("PRAGMA table_info(positions)")}
+        if "position_id" not in position_columns:
+            self._migrate_positions_for_multiple_entries()
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS positions_condition_status_idx "
+            "ON positions(condition_id, status)"
+        )
+        self.db.commit()
         observation_columns = {row[1] for row in self.db.execute("PRAGMA table_info(observations)")}
         if "condition_id" not in observation_columns:
             self.db.execute("ALTER TABLE observations ADD COLUMN condition_id TEXT")
@@ -103,6 +112,38 @@ class Store:
             self.db.execute(
                 "ALTER TABLE transcript_mentions ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'govinfo'")
             self.db.commit()
+
+    def _migrate_positions_for_multiple_entries(self) -> None:
+        """Replace the legacy condition-keyed table without losing positions."""
+        self.db.execute("ALTER TABLE positions RENAME TO positions_legacy")
+        self.db.execute(
+            """CREATE TABLE positions (
+              position_id INTEGER PRIMARY KEY AUTOINCREMENT,
+              condition_id TEXT NOT NULL,
+              token_id TEXT NOT NULL,
+              side TEXT NOT NULL,
+              size_usd REAL NOT NULL,
+              entry_price REAL NOT NULL,
+              status TEXT NOT NULL,
+              opened_at TEXT NOT NULL,
+              order_id TEXT,
+              peak_price REAL NOT NULL DEFAULT 0,
+              question TEXT NOT NULL DEFAULT '',
+              end_date TEXT,
+              tick_size TEXT NOT NULL DEFAULT '0.01',
+              neg_risk INTEGER NOT NULL DEFAULT 0
+            )"""
+        )
+        self.db.execute(
+            """INSERT INTO positions
+               (condition_id,token_id,side,size_usd,entry_price,status,opened_at,
+                order_id,peak_price,question,end_date,tick_size,neg_risk)
+               SELECT condition_id,token_id,side,size_usd,entry_price,status,opened_at,
+                      order_id,peak_price,question,end_date,tick_size,neg_risk
+               FROM positions_legacy"""
+        )
+        self.db.execute("DROP TABLE positions_legacy")
+        self.db.commit()
 
     def historical(self, subject: str, phrase: str, context: str) -> tuple[int, int]:
         row = self.db.execute(
@@ -260,10 +301,10 @@ class Store:
     def record_position(self, condition_id: str, token_id: str, side: str,
                         size: float, price: float, order_id: str | None,
                         question: str, end_date: str, tick_size: str,
-                        neg_risk: bool) -> None:
+                        neg_risk: bool) -> int:
         now = datetime.now(timezone.utc).isoformat()
-        self.db.execute(
-            """INSERT OR REPLACE INTO positions
+        cursor = self.db.execute(
+            """INSERT INTO positions
                (condition_id,token_id,side,size_usd,entry_price,status,opened_at,
                 order_id,peak_price,question,end_date,tick_size,neg_risk)
                VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?)""",
@@ -273,28 +314,35 @@ class Store:
         self.db.commit()
         Path(self.journal).parent.mkdir(parents=True, exist_ok=True)
         with open(self.journal, "a") as fh:
-            fh.write(json.dumps({"event": "OPEN", "time": now, "condition_id": condition_id,
+            fh.write(json.dumps({"event": "OPEN", "time": now,
+                                 "position_id": cursor.lastrowid,
+                                 "condition_id": condition_id,
                                  "token_id": token_id, "side": side, "size_usd": size,
                                  "price": price, "order_id": order_id}) + "\n")
+        return int(cursor.lastrowid)
 
     def daily_loss(self) -> float:
         day = datetime.now(timezone.utc).date().isoformat()
         row = self.db.execute("SELECT realized_usd FROM daily_pnl WHERE day=?", (day,)).fetchone()
         return min(0.0, float(row[0])) if row else 0.0
 
-    def update_peak(self, condition_id: str, price: float) -> float:
+    def update_peak(self, position_id: int, price: float) -> float:
         self.db.execute(
-            "UPDATE positions SET peak_price=MAX(peak_price, ?) WHERE condition_id=? AND status='open'",
-            (price, condition_id),
+            "UPDATE positions SET peak_price=MAX(peak_price, ?) WHERE position_id=? AND status='open'",
+            (price, position_id),
         )
         self.db.commit()
-        row = self.db.execute("SELECT peak_price FROM positions WHERE condition_id=?", (condition_id,)).fetchone()
+        row = self.db.execute(
+            "SELECT peak_price FROM positions WHERE position_id=?", (position_id,)
+        ).fetchone()
         return float(row[0]) if row else price
 
-    def close_position(self, condition_id: str, exit_price: float,
+    def close_position(self, position_id: int, exit_price: float,
                        order_id: str | None, shares_sold: float) -> float:
-        row = self.db.execute("SELECT * FROM positions WHERE condition_id=? AND status='open'",
-                              (condition_id,)).fetchone()
+        row = self.db.execute(
+            "SELECT * FROM positions WHERE position_id=? AND status='open'",
+            (position_id,),
+        ).fetchone()
         if not row:
             return 0.0
         entry = float(row["entry_price"])
@@ -307,11 +355,15 @@ class Store:
         remaining_usd = max(0.0, float(row["size_usd"]) - cost_basis)
         fully_closed = sold >= held_shares * 0.999
         if fully_closed:
-            self.db.execute("UPDATE positions SET status='closed', size_usd=0 WHERE condition_id=?",
-                            (condition_id,))
+            self.db.execute(
+                "UPDATE positions SET status='closed', size_usd=0 WHERE position_id=?",
+                (position_id,),
+            )
         else:
-            self.db.execute("UPDATE positions SET size_usd=? WHERE condition_id=? AND status='open'",
-                            (remaining_usd, condition_id))
+            self.db.execute(
+                "UPDATE positions SET size_usd=? WHERE position_id=? AND status='open'",
+                (remaining_usd, position_id),
+            )
         day = datetime.now(timezone.utc).date().isoformat()
         self.db.execute(
             """INSERT INTO daily_pnl(day,realized_usd) VALUES(?,?)
@@ -322,7 +374,8 @@ class Store:
         with open(self.journal, "a") as fh:
             fh.write(json.dumps({"event": "CLOSE" if fully_closed else "PARTIAL_CLOSE",
                                  "time": datetime.now(timezone.utc).isoformat(),
-                                 "condition_id": condition_id, "exit_price": exit_price,
+                                 "position_id": position_id,
+                                 "condition_id": row["condition_id"], "exit_price": exit_price,
                                  "shares_sold": sold, "pnl_usd": pnl,
                                  "order_id": order_id}) + "\n")
         return pnl
