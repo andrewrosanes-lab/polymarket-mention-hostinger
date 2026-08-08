@@ -1,0 +1,93 @@
+# Live-only by design. The process stays locked until explicit owner approval.
+mode: live
+allow_live_trading: false
+
+poll_interval_sec: 60
+max_markets_per_scan: 300
+max_candidates_per_cycle: 25
+minimum_confidence: 70
+
+weights:
+  historical_context: 0.35
+  order_book_imbalance: 0.20
+  news_live_impact: 0.25
+  market_prior_momentum: 0.14
+  pricing_edge: 0.06
+
+tiers:
+  - {name: C, min_confidence: 70, max_confidence: 80, size_usd: 3}
+  - {name: B, min_confidence: 80, max_confidence: 90, size_usd: 4}
+  - {name: A, min_confidence: 90, max_confidence: 100, size_usd: 5}
+
+risk:
+  bankroll_usd: 100
+  max_open_positions: 5
+  max_deployed_usd: 20
+  daily_loss_limit_usd: 10
+  max_entry_price: 0.93
+  min_entry_price: 0.16
+  min_liquidity_usd: 800
+  min_volume_usd: 800
+  max_spread_pct: 12
+  min_model_edge_pct: 6
+  min_cross_book_arb_pct: 6
+  max_hours_before_event: 2
+  require_known_event_start: true
+  one_position_per_condition: true
+  take_profit_pct: 30
+  stop_loss_pct: 25
+  low_price_stop_loss_pct: 50
+  low_price_trailing_stop_pct: 50
+  low_price_band_min: 0.16
+  low_price_band_max: 0.37
+  exit_minutes_before_end: 15
+  kill_switch_file: state/HALT
+
+discovery:
+  # Verified against Gamma's live /tags endpoint on 2026-08-08. Tag discovery
+  # is primary; text search below is only a fallback for newly launched series.
+  tag_ids:
+    - {id: 105481, label: "Trump Speech Mentions"}
+    - {id: 105482, label: "Politics Mentions"}
+    - {id: 105486, label: "NFL Mentions"}
+    - {id: 100343, label: "Mentions"}
+  validate_tags: true
+  use_text_search_fallback: true
+  # Each query is searched independently. Add exact people, teams, leagues,
+  # phrases, or recurring series you want the bot to monitor.
+  queries: [Trump, NFL, speech, debate, press conference]
+  mention_markers: [say, mention, mentions, mentioned, utter, word, phrase]
+
+news:
+  enabled: true
+  lookback_hours: 24
+  max_items: 30
+  # Google News RSS is used read-only; no key is required.
+  rss_url: "https://news.google.com/rss/search"
+
+execution:
+  maker_first: true
+  maker_timeout_sec: 20
+  maker_poll_sec: 2
+  taker_fallback_order_type: FAK
+  price_buffer_ticks: 1
+  # Taker fallback is dynamically bounded to the requested 1%-3% range.
+  taker_min_slippage_bps: 100
+  taker_max_slippage_bps: 300
+  paper_slippage_bps: 50
+  signature_type: 3
+  chain_id: 137
+  host: "https://clob.polymarket.com"
+
+# Gamma does not always publish the actual speech/kickoff time. Add ISO-8601
+# UTC overrides by event slug. With require_known_event_start=true, unknown
+# schedules are skipped instead of using the market resolution deadline.
+scheduled_events: {}
+# Example:
+# scheduled_events:
+#   trump-weekly-mentions-august-10: "2026-08-10T18:00:00Z"
+
+paths:
+  database: state/mention_bot.sqlite3
+  journal: state/trades.jsonl
+  log: state/mention_bot.log

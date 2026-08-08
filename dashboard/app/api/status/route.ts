@@ -1,0 +1,2 @@
+export const dynamic = "force-dynamic";
+export async function GET(){const endpoint=process.env.MENTION_BOT_STATUS_URL;if(!endpoint)return Response.json({connected:false,mode:"LIVE · LOCKED"},{headers:{"Cache-Control":"no-store"}});try{const response=await fetch(endpoint,{cache:"no-store",signal:AbortSignal.timeout(5000)});if(!response.ok)throw new Error();return Response.json({...await response.json(),connected:true},{headers:{"Cache-Control":"no-store"}})}catch{return Response.json({connected:false,mode:"LIVE · LOCKED"},{status:503,headers:{"Cache-Control":"no-store"}})}}

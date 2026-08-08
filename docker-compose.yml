@@ -1,0 +1,20 @@
+services:
+  dashboard:
+    build: ./dashboard
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+
+  mention-bot:
+    build: ./bot
+    restart: "no"
+    command: ["python", "run.py", "--check"]
+    volumes:
+      - mention_state:/app/state
+    environment:
+      PYTHONUNBUFFERED: "1"
+
+volumes:
+  mention_state:
