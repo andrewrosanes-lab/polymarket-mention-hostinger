@@ -14,6 +14,12 @@ weights:
   market_prior_momentum: 0.14
   pricing_edge: 0.06
 
+historical:
+  enabled: true
+  refresh_hours: 6
+  max_events_per_tag: 75
+  resolution_confidence: 0.99
+
 tiers:
   - {name: C, min_confidence: 70, max_confidence: 80, size_usd: 3}
   - {name: B, min_confidence: 80, max_confidence: 90, size_usd: 4}
