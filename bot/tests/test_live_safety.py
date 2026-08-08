@@ -5,6 +5,7 @@ import pytest
 from mentionbot.engine import Engine
 from mentionbot.execution import _response_fill
 from mentionbot.models import BookSignal, Market, Score
+from mentionbot.market import PolymarketData
 from mentionbot.storage import Store
 
 
@@ -37,6 +38,41 @@ def test_partial_exit_keeps_remaining_position_open(tmp_path):
     row = store.open_positions()[0]
     assert round(pnl, 4) == .4
     assert round(row["size_usd"], 4) == 2.4
+
+
+def test_historical_observations_are_resolved_and_deduplicated(tmp_path):
+    class Response:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"events": [{"title": "Trump rally speech", "description": "address",
+                "markets": [
+                    {"conditionId": "yes-condition", "question": 'Will Trump say "tariff"?',
+                     "description": "speech", "outcomes": '["Yes","No"]',
+                     "outcomePrices": '["1","0"]'},
+                    {"conditionId": "no-condition", "question": 'Will Trump say "moon"?',
+                     "description": "speech", "outcomes": '["Yes","No"]',
+                     "outcomePrices": '["0","1"]'},
+                    {"conditionId": "unresolved", "question": 'Will Trump say "maybe"?',
+                     "outcomes": '["Yes","No"]', "outcomePrices": '["0.5","0.5"]'},
+                ]}], "next_cursor": None}
+    cfg = {"historical": {"enabled": True, "max_events_per_tag": 5,
+            "resolution_confidence": .99},
+           "discovery": {"tag_ids": [{"id": 1}, {"id": 2}]},
+           "execution": {"host": "https://clob.polymarket.com"}}
+    data = PolymarketData(cfg)
+    data.session = type("Session", (), {"get": lambda self, *a, **k: Response()})()
+    observations = data.resolved_observations()
+    assert len(observations) == 2
+    assert {x["condition_id"]: x["occurred"] for x in observations} == {
+        "yes-condition": True, "no-condition": False}
+
+    store = Store(str(tmp_path / "history.db"), str(tmp_path / "history.jsonl"))
+    for item in observations + observations:
+        store.add_observation(item["subject"], item["phrase"], item["context"],
+                              item["occurred"], item["condition_id"])
+    assert store.observation_count() == 2
+    hits, total, scope = store.historical_pattern("Trump", "new phrase", "speech")
+    assert total == 2 and hits == 1 and scope == "subject/context"
 
 
 def test_risk_uses_executable_ask_not_cached_gamma_price():
