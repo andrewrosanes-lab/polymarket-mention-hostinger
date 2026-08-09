@@ -167,7 +167,7 @@ class PolymarketData:
             return (window_rank, capital_rank, unknown_rank, -market.liquidity,
                     -market.volume, market.end_date)
 
-        limit = int(self.cfg.get("max_candidates_per_cycle", 40))
+        limit = int(self.cfg.get("max_candidates_per_cycle", 100))
         return sorted(markets, key=rank)[:limit]
 
     def resolved_observations(self) -> list[dict]:
