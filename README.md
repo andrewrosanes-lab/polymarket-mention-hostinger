@@ -19,6 +19,20 @@ not transcript bodies. No GovInfo API key is required.
 Optional television history uses `OPENSUBTITLES_API_KEY`, supplied only in the
 VPS environment. Missing credentials do not prevent the live bot from running.
 
+## Evidence and dashboard status
+
+The bot writes an atomic, read-only operational snapshot to
+`state/status.json`. Docker mounts the state volume read-only in the dashboard,
+which reports the latest cycle, open exposure, grounded news sources, and the
+exact historical scope and sample size used for each evaluated contract. A
+snapshot older than ten minutes is shown as disconnected.
+
+News evidence is deliberately fail-neutral: an article must contain both the
+market's event entity (person, TV series, or NFL matchup) and the target phrase.
+Duplicate headlines are counted once. TV subtitle statistics are isolated by
+series, and TV/NFL markets without phrase-level evidence receive a neutral 50
+instead of a generic cross-market fallback.
+
 ## Live activation
 
 Live activation was explicitly approved by the owner. Never commit a private

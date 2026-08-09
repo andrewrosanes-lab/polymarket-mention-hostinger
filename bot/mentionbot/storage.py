@@ -156,14 +156,18 @@ class Store:
 
     def historical_pattern(self, subject: str, phrase: str,
                            context: str, period: str = "event",
-                           min_mentions: int = 1) -> tuple[int, int, str]:
+                           min_mentions: int = 1,
+                           allow_broad_fallback: bool = True) -> tuple[int, int, str]:
         transcript = self.transcript_pattern(
-            subject, phrase, context, period, min_mentions)
+            subject, phrase, context, period, min_mentions,
+            allow_phrase_fallback=allow_broad_fallback)
         if transcript[1]:
             return transcript
         exact_hits, exact_total = self.historical(subject, phrase, context)
         if exact_total:
             return exact_hits, exact_total, "exact phrase/context"
+        if not allow_broad_fallback:
+            return 0, 0, "neutral — no phrase-level evidence"
         useful_subject = subject.lower() not in {"anyone", "unknown"}
         queries = []
         if useful_subject:
@@ -187,16 +191,20 @@ class Store:
 
     def transcript_pattern(self, subject: str, phrase: str,
                            context: str, period: str = "event",
-                           min_mentions: int = 1) -> tuple[int, int, str]:
+                           min_mentions: int = 1,
+                           allow_phrase_fallback: bool = True) -> tuple[int, int, str]:
         if subject.lower() == "unknown":
             return 0, 0, "neutral"
-        for base_scope, where, params in (
+        queries = [
             ("official transcript phrase/context",
              "lower(subject)=lower(?) AND lower(phrase)=lower(?) AND lower(context)=lower(?)",
              (subject, phrase, context)),
-            ("official transcript phrase",
-             "lower(subject)=lower(?) AND lower(phrase)=lower(?)", (subject, phrase)),
-        ):
+        ]
+        if allow_phrase_fallback:
+            queries.append(("official transcript phrase",
+                            "lower(subject)=lower(?) AND lower(phrase)=lower(?)",
+                            (subject, phrase)))
+        for base_scope, where, params in queries:
             if period == "week":
                 row = self.db.execute(
                     f"""SELECT COUNT(*) n,
@@ -290,6 +298,21 @@ class Store:
     def observation_count(self) -> int:
         return int(self.db.execute("SELECT COUNT(*) FROM observations").fetchone()[0])
 
+    def evidence_summary(self) -> dict:
+        sources = {
+            str(row["source_kind"]): {
+                "documents": int(row["documents"]),
+                "mentions": int(row["mentions"]),
+            }
+            for row in self.db.execute(
+                """SELECT source_kind, COUNT(DISTINCT document_id) documents,
+                          COALESCE(SUM(mention_count),0) mentions
+                   FROM transcript_mentions GROUP BY source_kind"""
+            )
+        }
+        return {"gammaObservations": self.observation_count(),
+                "transcriptSources": sources}
+
     def open_positions(self) -> list[sqlite3.Row]:
         return list(self.db.execute("SELECT * FROM positions WHERE status='open'"))
 
@@ -322,9 +345,12 @@ class Store:
         return int(cursor.lastrowid)
 
     def daily_loss(self) -> float:
+        return min(0.0, self.daily_pnl())
+
+    def daily_pnl(self) -> float:
         day = datetime.now(timezone.utc).date().isoformat()
         row = self.db.execute("SELECT realized_usd FROM daily_pnl WHERE day=?", (day,)).fetchone()
-        return min(0.0, float(row[0])) if row else 0.0
+        return float(row[0]) if row else 0.0
 
     def update_peak(self, position_id: int, price: float) -> float:
         self.db.execute(

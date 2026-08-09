@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
+import json
 import sqlite3
 
 import pytest
@@ -7,10 +9,11 @@ from mentionbot.engine import Engine
 from mentionbot.execution import _response_fill
 from mentionbot.models import BookSignal, Market, Score
 from mentionbot.market import PolymarketData
+from mentionbot.news import NewsScorer
 from mentionbot.storage import Store
 from mentionbot.transcript_history import (count_phrase, market_history_shape,
                                            parse_govinfo_transcript)
-from mentionbot.subtitle_history import infer_episode_target, subtitle_text
+from mentionbot.subtitle_history import EpisodeTarget, infer_episode_target, subtitle_text
 
 
 def test_confirmed_buy_and_sell_amounts():
@@ -120,6 +123,82 @@ def test_historical_observations_are_resolved_and_deduplicated(tmp_path):
     assert total == 2 and hits == 1 and scope == "subject/context"
 
 
+def test_phrase_level_history_can_disable_misleading_broad_fallback(tmp_path):
+    store = Store(str(tmp_path / "history.db"), str(tmp_path / "history.jsonl"))
+    store.add_observation("Anyone", "different word", "other", True, "one")
+    store.add_observation("Anyone", "another word", "other", False, "two")
+    hits, total, scope = store.historical_pattern(
+        "Anyone", "Power", "other", allow_broad_fallback=False)
+    assert (hits, total) == (0, 0)
+    assert scope == "neutral — no phrase-level evidence"
+
+
+def test_subtitle_history_does_not_leak_between_series(tmp_path):
+    store = Store(str(tmp_path / "history.db"), str(tmp_path / "history.jsonl"))
+    store.add_transcript_mention(
+        "opensubtitles:1", "Anyone", "Power", "tv:big brother", 2,
+        "2026-08-01", "Big Brother S28E16", "https://example.com/subtitle",
+        source_kind="opensubtitles")
+    assert store.historical_pattern(
+        "Anyone", "Power", "tv:big brother", allow_broad_fallback=False)[:2] == (1, 1)
+    hits, total, scope = store.historical_pattern(
+        "Anyone", "Power", "tv:house of the dragon", allow_broad_fallback=False)
+    assert (hits, total) == (0, 0)
+    assert scope == "neutral — no phrase-level evidence"
+
+
+def test_news_requires_event_entity_and_phrase_and_deduplicates():
+    published = format_datetime(datetime.now(timezone.utc))
+    xml = f"""<rss><channel>
+      <item><title>Big Brother preview: Power may decide the episode</title>
+        <description>The house plans to focus on Power.</description>
+        <pubDate>{published}</pubDate><link>https://example.com/a</link>
+        <source>Example News</source></item>
+      <item><title>Big Brother preview: Power may decide the episode</title>
+        <description>Duplicate syndication.</description>
+        <pubDate>{published}</pubDate><link>https://duplicate.example/a</link></item>
+      <item><title>Power demand rises across Texas</title>
+        <description>Unrelated energy coverage.</description>
+        <pubDate>{published}</pubDate><link>https://example.com/b</link></item>
+      <item><title>Big Brother episode preview</title>
+        <description>No target phrase here.</description>
+        <pubDate>{published}</pubDate><link>https://example.com/c</link></item>
+    </channel></rss>""".encode()
+
+    class Response:
+        content = xml
+        def raise_for_status(self): pass
+
+    cfg = {"news": {"enabled": True, "rss_url": "https://news.example/rss",
+                     "max_items": 30, "lookback_hours": 24}}
+    scorer = NewsScorer(cfg)
+    scorer.session = type("Session", (), {
+        "get": lambda self, *args, **kwargs: Response()})()
+    market = Market("c", 'Will anyone say "Power" during Big Brother E17?',
+        "Big Brother Episode 17", "s", "es", None,
+        datetime.now(timezone.utc) + timedelta(hours=2), "y", "n", .5, .5,
+        1000, 1000, False, "0.01", "Anyone", "Power", "other",
+        EpisodeTarget("Big Brother", 28, 17))
+    evidence = scorer.score(market)
+    assert evidence.count == 1
+    assert evidence.score > 50
+    assert evidence.entity == "Big Brother"
+    assert len(evidence.sources) == 1
+
+
+def test_news_without_reliable_event_entity_stays_neutral_without_request():
+    cfg = {"news": {"enabled": True, "rss_url": "https://news.example/rss",
+                     "max_items": 30, "lookback_hours": 24}}
+    scorer = NewsScorer(cfg)
+    scorer.session = type("Session", (), {
+        "get": lambda self, *args, **kwargs: pytest.fail("network should not be called")})()
+    market = Market("c", 'Will anyone say "Power"?', "", "s", "es", None,
+        datetime.now(timezone.utc) + timedelta(hours=2), "y", "n", .5, .5,
+        1000, 1000, False, "0.01", "Anyone", "Power", "other")
+    evidence = scorer.score(market)
+    assert (evidence.score, evidence.count, evidence.entity) == (50.0, 0, "ungrounded")
+
+
 def test_official_transcript_counts_only_president_and_overrides_gamma(tmp_path):
     raw = """<html><body>
       <p class="s1">Administration of Donald J. Trump, 2026</p>
@@ -194,3 +273,19 @@ def test_risk_uses_executable_ask_not_cached_gamma_price():
     score = Score(80, 80, "YES", "B", 4, 50, 50, 50, 50, 50, 10, 0, "")
     book = BookSignal(50, .93, .95, 2, 1000, 1000)
     assert engine.risk_ok(market, score, book) == (False, "executable entry price gate")
+
+
+def test_dashboard_status_is_atomic_and_contains_operational_evidence(tmp_path):
+    store = Store(str(tmp_path / "state.db"), str(tmp_path / "journal.jsonl"))
+    store.add_observation("Trump", "Security", "speech", True, "resolved")
+    store.record_position("c", "t", "YES", 3, .3, "o", "Question",
+                          "2030-01-01T00:00:00+00:00", "0.01", False)
+    engine = Engine.__new__(Engine)
+    engine.cfg = {"mode": "live", "paths": {"status": str(tmp_path / "status.json")}}
+    engine.store = store
+    engine.write_status([object()], [{"confidence": 71.0, "question": "Question"}])
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert status["connected"] is True and status["mode"] == "LIVE"
+    assert status["markets"] == 1 and status["positions"] == 1
+    assert status["deployed"] == 3 and status["evidence"]["gammaObservations"] == 1
+    assert not (tmp_path / "status.json.tmp").exists()

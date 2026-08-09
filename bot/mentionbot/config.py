@@ -10,7 +10,7 @@ def load(path: str = "config.yaml") -> dict:
     with open(path) as fh:
         cfg = yaml.safe_load(fh)
     _validate(cfg)
-    for key in ("database", "journal", "log"):
+    for key in ("database", "journal", "log", "status"):
         Path(cfg["paths"][key]).parent.mkdir(parents=True, exist_ok=True)
     return cfg
 
