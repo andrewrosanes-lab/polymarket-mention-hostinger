@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 from .models import BookSignal, Market, Score
 
 
@@ -22,31 +20,35 @@ def tier_for(confidence: float, tiers: list[dict]) -> tuple[str | None, float]:
 
 
 def combine(market: Market, yes_book: BookSignal, no_book: BookSignal,
-            hist: float, news: float, momentum: float, cfg: dict,
+            hist: float, news: float, market_prior: float,
+            momentum: float, cfg: dict,
             news_count: int, history_scope: str = "exact",
             history_samples: int = 0) -> Score:
-    w = cfg["weights"]
-    non_price_weight = (w["historical_context"] + w["order_book_imbalance"]
-                        + w["news_live_impact"])
-    fundamental = (hist*w["historical_context"]
-                   + yes_book.score*w["order_book_imbalance"]
-                   + news*w["news_live_impact"]) / non_price_weight
-    edge_yes = fundamental - yes_book.best_ask * 100
-    pricing_edge = max(0, min(100, 50 + edge_yes * 2))
-    yes = hist*w["historical_context"] + yes_book.score*w["order_book_imbalance"] \
-        + news*w["news_live_impact"] + momentum*w["market_prior_momentum"] \
-        + pricing_edge*w["pricing_edge"]
+    """Separate probability estimation from market-timing confirmation."""
+    probability_weights = cfg["probability_weights"]
+    probability_weight = sum(probability_weights.values())
+    yes = (hist*probability_weights["historical_context"]
+           + news*probability_weights["news_live_impact"]
+           + market_prior*probability_weights["market_prior"]) / probability_weight
     yes = max(0, min(100, yes))
     side = "YES" if yes >= 50 else "NO"
     confidence = yes if side == "YES" else 100 - yes
+    selected_book = yes_book if side == "YES" else no_book
+    selected_momentum = momentum if side == "YES" else 100 - momentum
+    timing_weights = cfg["timing_weights"]
+    timing_weight = sum(timing_weights.values())
+    timing = (selected_book.score*timing_weights["order_book_imbalance"]
+              + selected_momentum*timing_weights["momentum"]) / timing_weight
     executable = yes_book.best_ask if side == "YES" else no_book.best_ask
     model_probability = yes / 100 if side == "YES" else (100 - yes) / 100
     model_edge_pct = (model_probability - executable) * 100
     cross_book_arb_pct = (1 - yes_book.best_ask - no_book.best_ask) * 100
+    pricing_edge = max(0, min(100, 50 + model_edge_pct * 2))
     tier, size = tier_for(confidence, cfg["tiers"])
     explanation = (f"historical={hist:.1f} ({history_scope}, n={history_samples}); "
-                   f"book={yes_book.score:.1f}; news={news:.1f} "
-                   f"({news_count} relevant); momentum={momentum:.1f}; pricing_edge={pricing_edge:.1f}; "
+                   f"news={news:.1f} ({news_count} relevant); market_prior={market_prior:.1f}; "
+                   f"timing={timing:.1f}; pricing_edge={pricing_edge:.1f}; "
                    f"model_edge={model_edge_pct:.1f}%; cross_book_arb={cross_book_arb_pct:.1f}%")
     return Score(yes, confidence, side, tier, size, hist, yes_book.score, news,
-                 momentum, pricing_edge, model_edge_pct, cross_book_arb_pct, explanation)
+                 momentum, pricing_edge, model_edge_pct, cross_book_arb_pct,
+                 explanation, timing)

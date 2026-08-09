@@ -33,6 +33,18 @@ Duplicate headlines are counted once. TV subtitle statistics are isolated by
 series, and TV/NFL markets without phrase-level evidence receive a neutral 50
 instead of a generic cross-market fallback.
 
+The strategy separates its jobs: history, grounded news, and the current
+market prior estimate mention probability; order-book pressure and momentum
+confirm entry timing; the executable ask must still leave at least six
+percentage points of directional model edge. No more than two open entries may
+concentrate in one contract.
+
+Complement-price arbitrage (`1 - YES ask - NO ask`) is detected independently
+at a six-percent threshold. Its live execution is safety-locked because the
+CLOB does not document a batch of two FOK outcome orders as atomic across both
+legs, and this project does not yet contain automatic paired settlement. The
+dashboard labels these as `ARB WATCH`, never as completed arbitrage trades.
+
 ## Live activation
 
 Live activation was explicitly approved by the owner. Never commit a private

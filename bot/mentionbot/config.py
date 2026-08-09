@@ -18,15 +18,21 @@ def load(path: str = "config.yaml") -> dict:
 def _validate(cfg: dict) -> None:
     if cfg.get("mode") not in {"paper", "live"}:
         raise ValueError("mode must be paper or live")
-    weights = cfg["weights"]
-    if abs(sum(float(v) for v in weights.values()) - 1.0) > 1e-9:
-        raise ValueError("weights must sum to 1.0")
+    for group in ("probability_weights", "timing_weights"):
+        weights = cfg.get(group) or {}
+        if not weights or any(float(value) <= 0 for value in weights.values()):
+            raise ValueError(f"{group} must contain positive weights")
     if float(cfg["minimum_confidence"]) < 50:
         raise ValueError("minimum_confidence must be at least 50")
     tiers = sorted(cfg["tiers"], key=lambda x: x["min_confidence"])
     for tier in tiers:
         if tier["min_confidence"] >= tier["max_confidence"]:
             raise ValueError(f"invalid tier {tier['name']}")
+    if (cfg.get("arbitrage") or {}).get("execution_enabled"):
+        raise ValueError(
+            "live paired arbitrage is safety-locked: Polymarket does not document "
+            "batch FOK orders as atomic across both outcome legs"
+        )
     if cfg["mode"] == "live" and cfg.get("allow_live_trading"):
         required = ["POLYMARKET_PRIVATE_KEY", "POLYMARKET_FUNDER_ADDRESS"]
         missing = [name for name in required if not os.getenv(name)]

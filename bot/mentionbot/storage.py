@@ -321,6 +321,12 @@ class Store:
             "SELECT 1 FROM positions WHERE condition_id=? AND status='open'", (condition_id,)
         ).fetchone() is not None
 
+    def open_position_count(self, condition_id: str) -> int:
+        return int(self.db.execute(
+            "SELECT COUNT(*) FROM positions WHERE condition_id=? AND status='open'",
+            (condition_id,),
+        ).fetchone()[0])
+
     def record_position(self, condition_id: str, token_id: str, side: str,
                         size: float, price: float, order_id: str | None,
                         question: str, end_date: str, tick_size: str,

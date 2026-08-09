@@ -38,6 +38,10 @@ def _normalized(value: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9]+", " ", value.lower()).split())
 
 
+def _contains_phrase(text: str, phrase: str) -> bool:
+    return f" {phrase} " in f" {text} "
+
+
 def _event_entities(market: Market) -> tuple[str, ...]:
     episode = market.episode_target
     series = str(getattr(episode, "series", "") or "").strip()
@@ -112,8 +116,18 @@ class NewsScorer:
             age = max(0.0, (now - parsed).total_seconds() / 3600) if parsed else 999
             if age > self.cfg["news"]["lookback_hours"]:
                 continue
-            entity_relevant = all(entity in text for entity in normalized_entities)
-            phrase_relevant = any(part in text for part in normalized_phrases)
+            entity_relevant = all(_contains_phrase(text, entity)
+                                  for entity in normalized_entities)
+            # Remove the grounding entity before looking for the target phrase.
+            # Otherwise a contract for "Dragon" is spuriously supported by every
+            # headline containing the series name "House of the Dragon".
+            phrase_text = text
+            for entity in normalized_entities:
+                phrase_text = re.sub(
+                    rf"(?<![a-z0-9]){re.escape(entity)}(?![a-z0-9])", " ", phrase_text)
+            phrase_text = " ".join(phrase_text.split())
+            phrase_relevant = any(_contains_phrase(phrase_text, part)
+                                  for part in normalized_phrases)
             if not (entity_relevant and phrase_relevant):
                 continue
             count += 1
