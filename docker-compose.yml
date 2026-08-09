@@ -7,8 +7,10 @@ services:
     environment:
       NODE_ENV: production
       MENTION_BOT_STATUS_FILE: /app/state/status.json
+      MENTION_BOT_CONTROL_FILE: /app/state/control.json
+      DASHBOARD_ADMIN_TOKEN: ${DASHBOARD_ADMIN_TOKEN:-}
     volumes:
-      - mention_state:/app/state:ro
+      - mention_state:/app/state
 
   mention-bot:
     build: ./bot
@@ -24,6 +26,7 @@ services:
       CLOB_SECRET: ${CLOB_SECRET:-}
       CLOB_PASSPHRASE: ${CLOB_PASSPHRASE:-}
       OPENSUBTITLES_API_KEY: ${OPENSUBTITLES_API_KEY:-}
+      MENTION_BOT_CONTROL_FILE: /app/state/control.json
 
 volumes:
   mention_state:

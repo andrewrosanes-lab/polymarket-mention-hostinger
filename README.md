@@ -39,11 +39,32 @@ confirm entry timing; the executable ask must still leave at least six
 percentage points of directional model edge. No more than two open entries may
 concentrate in one contract.
 
-Complement-price arbitrage (`1 - YES ask - NO ask`) is detected independently
+Unavailable history/news evidence is excluded and the remaining probability
+inputs are renormalized. Complement-price arbitrage (`1 - YES ask - NO ask`)
+is detected independently and receives its own execution-confidence metric
 at a six-percent threshold. Its live execution is safety-locked because the
 CLOB does not document a batch of two FOK outcome orders as atomic across both
 legs, and this project does not yet contain automatic paired settlement. The
 dashboard labels these as `ARB WATCH`, never as completed arbitrage trades.
+
+## Authenticated dashboard controls
+
+The dashboard can tune a strict whitelist without exposing wallet credentials:
+minimum confidence (65–90), minimum model edge (6–20%), timing confirmation
+(45–90), known-event entry window (1–4 hours), grounded-news participation,
+and pause/resume for new entries. Existing position monitoring and protective
+exits continue while entries are paused. Changes are validated twice: once by
+the dashboard API and again by the bot. Invalid control files fail closed by
+pausing new entries.
+
+Set a unique admin token of at least 24 characters in the VPS `.env`:
+
+```bash
+DASHBOARD_ADMIN_TOKEN=replace-with-a-long-random-secret
+```
+
+The browser holds the token only for the save request; it is never written to
+the status feed or bundled into the dashboard.
 
 ## Live activation
 
