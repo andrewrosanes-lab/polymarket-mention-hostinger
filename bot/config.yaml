@@ -7,12 +7,14 @@ max_markets_per_scan: 300
 max_candidates_per_cycle: 25
 minimum_confidence: 70
 
-weights:
+probability_weights:
   historical_context: 0.35
-  order_book_imbalance: 0.20
   news_live_impact: 0.25
-  market_prior_momentum: 0.14
-  pricing_edge: 0.06
+  market_prior: 0.14
+
+timing_weights:
+  order_book_imbalance: 0.20
+  momentum: 0.14
 
 historical:
   enabled: true
@@ -58,9 +60,10 @@ risk:
   max_spread_pct: 12
   min_model_edge_pct: 6
   min_cross_book_arb_pct: 6
+  min_timing_score: 45
   max_hours_before_event: 4
   require_known_event_start: false
-  one_position_per_condition: false
+  max_positions_per_condition: 2
   take_profit_pct: 30
   stop_loss_pct: 25
   low_price_stop_loss_pct: 50
@@ -69,6 +72,15 @@ risk:
   low_price_band_max: 0.37
   exit_minutes_before_end: 15
   kill_switch_file: state/HALT
+
+arbitrage:
+  enabled: true
+  min_edge_pct: 6
+  bundle_size_usd: 5
+  # Two FOK orders in one batch are not documented as atomic across both legs.
+  # Detection is live; execution remains locked until paired settlement and
+  # one-leg rollback are independently verified against the production SDK.
+  execution_enabled: false
 
 discovery:
   # Verified against Gamma's live /tags endpoint on 2026-08-08. Tag discovery

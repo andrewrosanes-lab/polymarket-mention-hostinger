@@ -52,3 +52,4 @@ class Score:
     model_edge_pct: float
     cross_book_arb_pct: float
     explanation: str
+    timing_score: float = 50.0

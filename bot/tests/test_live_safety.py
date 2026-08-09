@@ -10,6 +10,7 @@ from mentionbot.execution import _response_fill
 from mentionbot.models import BookSignal, Market, Score
 from mentionbot.market import PolymarketData
 from mentionbot.news import NewsScorer
+from mentionbot.scoring import combine
 from mentionbot.storage import Store
 from mentionbot.transcript_history import (count_phrase, market_history_shape,
                                            parse_govinfo_transcript)
@@ -199,6 +200,48 @@ def test_news_without_reliable_event_entity_stays_neutral_without_request():
     assert (evidence.score, evidence.count, evidence.entity) == (50.0, 0, "ungrounded")
 
 
+def test_news_does_not_count_phrase_only_present_inside_series_name():
+    published = format_datetime(datetime.now(timezone.utc))
+    xml = f"""<rss><channel><item>
+      <title>House of the Dragon season finale preview</title>
+      <description>The HBO series returns tonight.</description>
+      <pubDate>{published}</pubDate><link>https://example.com/dragon</link>
+    </item></channel></rss>""".encode()
+
+    class Response:
+        content = xml
+        def raise_for_status(self): pass
+
+    scorer = NewsScorer({"news": {"enabled": True, "rss_url": "https://news.example/rss",
+        "max_items": 30, "lookback_hours": 24}})
+    scorer.session = type("Session", (), {
+        "get": lambda self, *args, **kwargs: Response()})()
+    market = Market("c", 'Will anyone say "Dragon"?', "House of the Dragon",
+        "s", "es", None, datetime.now(timezone.utc) + timedelta(hours=2),
+        "y", "n", .5, .5, 1000, 1000, False, "0.01", "Anyone", "Dragon",
+        "other", EpisodeTarget("House of the Dragon", 3, 8))
+    evidence = scorer.score(market)
+    assert evidence.count == 0 and evidence.score == 50
+
+
+def test_probability_is_separate_from_book_timing():
+    cfg = {"probability_weights": {"historical_context": .35,
+                                    "news_live_impact": .25, "market_prior": .14},
+           "timing_weights": {"order_book_imbalance": .20, "momentum": .14},
+           "tiers": [{"name": "C", "min_confidence": 70,
+                      "max_confidence": 80, "size_usd": 3}]}
+    market = Market("c", "q", "e", "s", "es", None,
+        datetime.now(timezone.utc) + timedelta(hours=2), "y", "n", .5, .5,
+        1000, 1000, False, "0.01", "Trump", "word", "speech")
+    weak_book = BookSignal(10, .39, .40, 2, 100, 100)
+    strong_book = BookSignal(90, .39, .40, 2, 100, 100)
+    no_book = BookSignal(50, .59, .60, 2, 100, 100)
+    weak = combine(market, weak_book, no_book, 80, 70, 65, 60, cfg, 1)
+    strong = combine(market, strong_book, no_book, 80, 70, 65, 60, cfg, 1)
+    assert weak.yes_probability == strong.yes_probability
+    assert weak.timing_score < strong.timing_score
+
+
 def test_official_transcript_counts_only_president_and_overrides_gamma(tmp_path):
     raw = """<html><body>
       <p class="s1">Administration of Donald J. Trump, 2026</p>
@@ -261,11 +304,12 @@ def test_risk_uses_executable_ask_not_cached_gamma_price():
     engine = Engine.__new__(Engine)
     engine.cfg = {"risk": {"kill_switch_file": "/never", "max_open_positions": 5,
         "min_liquidity_usd": 800, "min_volume_usd": 800, "max_spread_pct": 12,
-        "min_model_edge_pct": 6, "require_known_event_start": False,
+        "min_timing_score": 45, "min_model_edge_pct": 6, "require_known_event_start": False,
         "max_hours_before_event": 4, "min_entry_price": .16, "max_entry_price": .93,
-        "one_position_per_condition": False}}
+        "max_positions_per_condition": 2}}
     engine.store = type("S", (), {"open_positions": lambda self: [],
-        "daily_loss": lambda self: -999, "has_condition": lambda self, c: False})()
+        "daily_loss": lambda self: -999,
+        "open_position_count": lambda self, c: 0})()
     market = Market("c", "q", "e", "s", "es",
         datetime.now(timezone.utc) + timedelta(minutes=30),
         datetime.now(timezone.utc) + timedelta(hours=3), "y", "n", .5, .5,
@@ -273,6 +317,29 @@ def test_risk_uses_executable_ask_not_cached_gamma_price():
     score = Score(80, 80, "YES", "B", 4, 50, 50, 50, 50, 50, 10, 0, "")
     book = BookSignal(50, .93, .95, 2, 1000, 1000)
     assert engine.risk_ok(market, score, book) == (False, "executable entry price gate")
+
+
+def test_arbitrage_is_detected_but_execution_remains_safety_locked():
+    engine = Engine.__new__(Engine)
+    engine.cfg = {
+        "arbitrage": {"enabled": True, "execution_enabled": False,
+                      "min_edge_pct": 6, "bundle_size_usd": 5},
+        "risk": {"kill_switch_file": "/never", "max_open_positions": 5,
+                 "min_cross_book_arb_pct": 6, "min_liquidity_usd": 800,
+                 "min_volume_usd": 800, "max_spread_pct": 12,
+                 "min_entry_price": .16, "max_entry_price": .93,
+                 "max_hours_before_event": 4},
+    }
+    engine.store = type("S", (), {"open_positions": lambda self: [],
+        "open_position_count": lambda self, condition: 0})()
+    market = Market("c", "q", "e", "s", "es", None,
+        datetime.now(timezone.utc) + timedelta(hours=2), "y", "n", .45, .48,
+        1000, 1000, False, "0.01", "Trump", "word", "speech")
+    yes_book = BookSignal(50, .44, .45, 2, 1000, 1000)
+    no_book = BookSignal(50, .47, .48, 2, 1000, 1000)
+    assert engine.arbitrage_status(market, yes_book, no_book, 7) == (
+        True, "qualified arb watch — paired execution safety lock")
+    assert engine.arbitrage_status(market, yes_book, no_book, 5)[0] is False
 
 
 def test_dashboard_status_is_atomic_and_contains_operational_evidence(tmp_path):

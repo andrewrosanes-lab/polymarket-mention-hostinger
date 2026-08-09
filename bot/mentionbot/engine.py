@@ -56,6 +56,7 @@ class Engine:
         if market.liquidity < r["min_liquidity_usd"]: return False, "low liquidity"
         if market.volume < r["min_volume_usd"]: return False, "low traded volume"
         if book.spread_pct > r["max_spread_pct"]: return False, "wide spread"
+        if score.timing_score < r["min_timing_score"]: return False, "timing score below 45"
         if score.model_edge_pct < r["min_model_edge_pct"]: return False, "model edge below 6%"
         if market.event_start is None:
             if r["require_known_event_start"]: return False, "unknown event start"
@@ -66,8 +67,37 @@ class Engine:
                 return False, f"more than {max_hours:g} hours before event"
         if not r["min_entry_price"] <= book.best_ask <= r["max_entry_price"]:
             return False, "executable entry price gate"
-        if r["one_position_per_condition"] and self.store.has_condition(market.condition_id): return False, "already open"
+        if self.store.open_position_count(market.condition_id) >= r["max_positions_per_condition"]:
+            return False, "per-contract exposure limit"
         return True, "ok"
+
+    def arbitrage_status(self, market, yes_book, no_book,
+                         edge_pct: float) -> tuple[bool, str]:
+        """Qualify complement-price arbitrage without submitting unsafe legs."""
+        cfg = self.cfg.get("arbitrage") or {}
+        r = self.cfg["risk"]
+        if not cfg.get("enabled", True): return False, "arb disabled"
+        if edge_pct < float(cfg.get("min_edge_pct", r["min_cross_book_arb_pct"])):
+            return False, "arb edge below 6%"
+        if os.path.exists(r["kill_switch_file"]): return False, "kill switch"
+        if len(self.store.open_positions()) + 2 > r["max_open_positions"]:
+            return False, "two position slots required"
+        if self.store.open_position_count(market.condition_id):
+            return False, "existing contract exposure"
+        if market.liquidity < r["min_liquidity_usd"]: return False, "low liquidity"
+        if market.volume < r["min_volume_usd"]: return False, "low traded volume"
+        if max(yes_book.spread_pct, no_book.spread_pct) > r["max_spread_pct"]:
+            return False, "wide spread"
+        if not all(r["min_entry_price"] <= price <= r["max_entry_price"]
+                   for price in (yes_book.best_ask, no_book.best_ask)):
+            return False, "arb leg price gate"
+        if market.event_start is not None:
+            hours = (market.event_start - datetime.now(timezone.utc)).total_seconds()/3600
+            if hours > float(r["max_hours_before_event"]):
+                return False, "outside four-hour window"
+        if not cfg.get("execution_enabled", False):
+            return True, "qualified arb watch — paired execution safety lock"
+        return True, "qualified"
 
     def tick(self) -> None:
         self.refresh_history()
@@ -107,7 +137,11 @@ class Engine:
                 hist = historical_score(hits, total)
                 news_evidence = self.news.score(market)
                 momentum = self.data.momentum(market.yes_token, market.yes_price)
-                score = combine(market, book, no_book, hist, news_evidence.score, momentum,
+                midpoint = ((book.best_bid + book.best_ask) / 2
+                            if book.best_ask >= book.best_bid else market.yes_price)
+                market_prior = max(0, min(100, midpoint * 100))
+                score = combine(market, book, no_book, hist, news_evidence.score,
+                                market_prior, momentum,
                                 self.cfg, news_evidence.count, history_scope, total)
                 log.info("%s | %s %.1f | %s", market.question, score.side, score.confidence, score.explanation)
                 trade_book = book if score.side == "YES" else no_book
@@ -115,6 +149,8 @@ class Engine:
                     ok, reason = False, "confidence below 70%"
                 else:
                     ok, reason = self.risk_ok(market, score, trade_book)
+                arb_ready, arb_reason = self.arbitrage_status(
+                    market, book, no_book, score.cross_book_arb_pct)
                 signals.append({
                     "question": market.question,
                     "side": score.side,
@@ -128,7 +164,14 @@ class Engine:
                     "newsEntity": news_evidence.entity,
                     "newsSources": [asdict(source) for source in news_evidence.sources],
                     "modelEdge": round(score.model_edge_pct, 1),
+                    "marketPrior": round(market_prior, 1),
+                    "timingScore": round(score.timing_score, 1),
                     "crossBookArb": round(score.cross_book_arb_pct, 1),
+                    "arbQualified": arb_ready,
+                    "arbExecutable": bool(
+                        arb_ready and (self.cfg.get("arbitrage") or {}).get("execution_enabled")),
+                    "arbGate": arb_reason,
+                    "route": "DIRECTIONAL" if ok else ("ARB WATCH" if arb_ready else "NONE"),
                     "qualified": ok,
                     "gate": reason,
                 })
@@ -162,6 +205,13 @@ class Engine:
                 "lastCycle": datetime.now(timezone.utc).isoformat(),
                 "signals": sorted(signals, key=lambda item: item["confidence"], reverse=True)[:25],
                 "evidence": self.store.evidence_summary(),
+                "strategy": {
+                    "directional": True,
+                    "arbDetection": bool((self.cfg.get("arbitrage") or {}).get("enabled", True)),
+                    "arbExecution": bool((self.cfg.get("arbitrage") or {}).get("execution_enabled", False)),
+                    "maxPositionsPerContract": (self.cfg.get("risk") or {}).get(
+                        "max_positions_per_condition", 2),
+                },
             }
             temporary = path.with_suffix(path.suffix + ".tmp")
             temporary.write_text(json.dumps(payload, separators=(",", ":")))

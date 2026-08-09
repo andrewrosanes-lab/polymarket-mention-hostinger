@@ -4,19 +4,21 @@ This is a separate bot for markets such as “Will Trump say X during a
 speech?” or mentions during NFL broadcasts. It does not share code or state
 with the weather bot.
 
-## Scoring model
+## Strategy model
 
-| Component | Weight | Method |
-|---|---:|---|
-| Context-matched historical mentions | 35% | Beta-smoothed hit rate from official GovInfo presidential transcripts, with resolved Gamma markets as fallback |
-| Order-book imbalance | 20% | Bid versus ask notional near top-of-book |
-| News/live impact | 25% | Recent relevant Google News RSS headlines with time decay |
-| Market prior and momentum | 14% | Market probability plus one-day price movement |
-| Pricing edge | 6% | Model estimate versus the executable ask |
+| Role | Component | Relative weight | Method |
+|---|---|---:|---|
+| Probability | Context-matched historical mentions | 35 | Beta-smoothed hit rate from official GovInfo presidential transcripts, with resolved Gamma markets as fallback |
+| Probability | News/live impact | 25 | Grounded, deduplicated Google News RSS headlines with time decay |
+| Probability | Market prior | 14 | Current executable-book midpoint |
+| Timing | Order-book imbalance | 20 | Bid versus ask notional near top-of-book |
+| Timing | Momentum | 14 | Selected outcome's recent price direction |
+| Hard gate | Pricing edge | 6 percentage points | Model probability versus executable ask |
 
-It buys YES when the weighted score is 70–100. When the score is 0–30,
-inverted confidence is 70–100 and it buys NO. Scores in the middle do not
-trade.
+The probability components are normalized into a YES probability. It buys YES
+when confidence is 70–100, or NO when inverted confidence is 70–100, only when
+timing is at least 45 and executable model edge is at least six percentage
+points. Scores in the middle do not trade.
 
 | Tier | Confidence | Position |
 |---|---:|---:|
@@ -48,23 +50,23 @@ not per transcript. Numeric wording such as “10+ times” is also preserved as
 count threshold instead of being reduced to a simple mentioned/not-mentioned
 flag.
 
-“Pricing edge” is not guaranteed arbitrage. The bot separately reports gross
-cross-book arbitrage as `1 - YES ask - NO ask`. A real two-leg opportunity must
-remain at least 6% after fees and slippage. This version reports that condition
-but does not atomically execute both legs.
+“Pricing edge” is not arbitrage. The bot separately qualifies gross cross-book
+arbitrage as `1 - YES ask - NO ask` at 6% or more. It reports qualified
+opportunities as `ARB WATCH`; live paired execution is safety-locked because a
+batch of two FOK orders is not documented as atomic across both outcome legs.
 
 ## Safety defaults
 
 - Live-only execution with a separate owner-approval lock; it never silently paper trades
-- Five positions and $20 maximum deployment
-- $10 daily realized-loss halt
+- Five total open positions and no more than two entries per contract
 - Liquidity, spread, entry-price, and time gates
 - Minimum six-percentage-point modeled edge over the executable ask
+- Minimum timing score of 45
 - At least $800 liquidity and $800 traded volume
 - Entry prices restricted to $0.16–$0.93
 - Entries with known starts only from four hours before the event through the
   live event; markets without a published start time remain eligible
-- Multiple entries in the same market are tracked as separate positions and
+- Multiple entries are tracked separately, capped at two per contract, and
   still count against the five-position limit
 - Post-only GTC maker order first; cancel then FAK taker fallback after 20 seconds
 - Taker fallback slippage dynamically bounded between 1% and 3%
@@ -91,8 +93,8 @@ fallback. Populate resolved, context-matched history:
 ```
 
 For speech/game markets whose actual start is absent from Gamma, add the event
-slug and verified UTC start time under `scheduled_events`. The bot skips an
-unknown start rather than incorrectly using the resolution deadline.
+slug and verified UTC start time under `scheduled_events`. Unknown starts remain
+eligible as previously approved; known starts must be within four hours.
 
 ## Live lock
 
