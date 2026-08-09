@@ -181,13 +181,12 @@ def test_episode_metadata_and_subtitle_cleanup():
 def test_risk_uses_executable_ask_not_cached_gamma_price():
     engine = Engine.__new__(Engine)
     engine.cfg = {"risk": {"kill_switch_file": "/never", "max_open_positions": 5,
-        "daily_loss_limit_usd": 10,
         "min_liquidity_usd": 800, "min_volume_usd": 800, "max_spread_pct": 12,
         "min_model_edge_pct": 6, "require_known_event_start": False,
         "max_hours_before_event": 4, "min_entry_price": .16, "max_entry_price": .93,
         "one_position_per_condition": False}}
     engine.store = type("S", (), {"open_positions": lambda self: [],
-        "daily_loss": lambda self: 0, "has_condition": lambda self, c: False})()
+        "daily_loss": lambda self: -999, "has_condition": lambda self, c: False})()
     market = Market("c", "q", "e", "s", "es",
         datetime.now(timezone.utc) + timedelta(minutes=30),
         datetime.now(timezone.utc) + timedelta(hours=3), "y", "n", .5, .5,

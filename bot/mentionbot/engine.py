@@ -50,7 +50,6 @@ class Engine:
         r = self.cfg["risk"]
         if os.path.exists(r["kill_switch_file"]): return False, "kill switch"
         if len(self.store.open_positions()) >= r["max_open_positions"]: return False, "max positions"
-        if self.store.daily_loss() <= -r["daily_loss_limit_usd"]: return False, "daily loss limit"
         if market.liquidity < r["min_liquidity_usd"]: return False, "low liquidity"
         if market.volume < r["min_volume_usd"]: return False, "low traded volume"
         if book.spread_pct > r["max_spread_pct"]: return False, "wide spread"
