@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
+from dataclasses import asdict
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .execution import build
 from .market import PolymarketData
@@ -85,24 +88,50 @@ class Engine:
             log.exception("OpenSubtitles historical refresh failed; retaining existing history")
         self.manage_positions({market.condition_id: market for market in markets})
         log.info("discovered %d mention markets", len(markets))
+        signals = []
         for market in markets:
             try:
                 book = self.data.book(market.yes_token)
                 no_book = self.data.book(market.no_token)
                 history_period, min_mentions = market_history_shape(market.question)
+                history_context = (
+                    f"tv:{market.episode_target.series.lower()}"
+                    if market.episode_target else market.context
+                )
                 hits, total, history_scope = self.store.historical_pattern(
-                    market.subject, market.phrase, market.context,
-                    history_period, min_mentions)
+                    market.subject, market.phrase, history_context,
+                    history_period, min_mentions,
+                    allow_broad_fallback=(
+                        market.episode_target is None and market.context != "nfl_game"
+                    ))
                 hist = historical_score(hits, total)
-                news, count = self.news.score(market.subject, market.phrase, market.context)
+                news_evidence = self.news.score(market)
                 momentum = self.data.momentum(market.yes_token, market.yes_price)
-                score = combine(market, book, no_book, hist, news, momentum,
-                                self.cfg, count, history_scope, total)
+                score = combine(market, book, no_book, hist, news_evidence.score, momentum,
+                                self.cfg, news_evidence.count, history_scope, total)
                 log.info("%s | %s %.1f | %s", market.question, score.side, score.confidence, score.explanation)
-                if score.confidence < self.cfg["minimum_confidence"] or not score.tier:
-                    continue
                 trade_book = book if score.side == "YES" else no_book
-                ok, reason = self.risk_ok(market, score, trade_book)
+                if score.confidence < self.cfg["minimum_confidence"] or not score.tier:
+                    ok, reason = False, "confidence below 70%"
+                else:
+                    ok, reason = self.risk_ok(market, score, trade_book)
+                signals.append({
+                    "question": market.question,
+                    "side": score.side,
+                    "confidence": round(score.confidence, 1),
+                    "tier": score.tier,
+                    "historyScore": round(hist, 1),
+                    "historyScope": history_scope,
+                    "historySamples": total,
+                    "newsScore": round(news_evidence.score, 1),
+                    "newsCount": news_evidence.count,
+                    "newsEntity": news_evidence.entity,
+                    "newsSources": [asdict(source) for source in news_evidence.sources],
+                    "modelEdge": round(score.model_edge_pct, 1),
+                    "crossBookArb": round(score.cross_book_arb_pct, 1),
+                    "qualified": ok,
+                    "gate": reason,
+                })
                 if not ok:
                     log.info("SKIP %s: %s", market.question, reason); continue
                 fill = self.executor.buy(market, score.side, score.size_usd, trade_book)
@@ -116,6 +145,29 @@ class Engine:
                             fill.size_usd, fill.price, fill.order_id)
             except Exception:
                 log.exception("market evaluation failed: %s", market.question)
+        self.write_status(markets, signals)
+
+    def write_status(self, markets: list, signals: list[dict]) -> None:
+        try:
+            positions = self.store.open_positions()
+            path = Path(self.cfg["paths"]["status"])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "connected": True,
+                "mode": self.cfg["mode"].upper(),
+                "markets": len(markets),
+                "positions": len(positions),
+                "deployed": round(sum(float(row["size_usd"]) for row in positions), 2),
+                "dailyPnl": round(self.store.daily_pnl(), 2),
+                "lastCycle": datetime.now(timezone.utc).isoformat(),
+                "signals": sorted(signals, key=lambda item: item["confidence"], reverse=True)[:25],
+                "evidence": self.store.evidence_summary(),
+            }
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            temporary.write_text(json.dumps(payload, separators=(",", ":")))
+            os.replace(temporary, path)
+        except Exception:
+            log.exception("failed to write dashboard status")
 
     def manage_positions(self, markets: dict) -> None:
         r = self.cfg["risk"]

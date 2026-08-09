@@ -15,6 +15,11 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Mention Edge — Polymarket Console",
   description: "Owner-controlled live mention-market trading console",
+  openGraph: {
+    title: "Mention Edge — Polymarket Console",
+    description: "Live evidence, risk, and execution for mention markets",
+    images: [{ url: "/mention-edge-social.jpg", width: 1200, height: 630 }],
+  },
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",

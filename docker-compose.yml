@@ -6,6 +6,9 @@ services:
       - "3000:3000"
     environment:
       NODE_ENV: production
+      MENTION_BOT_STATUS_FILE: /app/state/status.json
+    volumes:
+      - mention_state:/app/state:ro
 
   mention-bot:
     build: ./bot

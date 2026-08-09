@@ -118,3 +118,4 @@ paths:
   database: state/mention_bot.sqlite3
   journal: state/trades.jsonl
   log: state/mention_bot.log
+  status: state/status.json

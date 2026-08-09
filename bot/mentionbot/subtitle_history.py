@@ -121,15 +121,17 @@ class OpenSubtitlesHistory:
         if not self.api_key:
             return 0, 0, 0
         refresh_hours = float(self.cfg.get("refresh_hours", 24))
-        grouped: dict[EpisodeTarget, set[tuple[str, str, str]]] = {}
+        grouped: dict[EpisodeTarget, set[tuple[str, str, str, str]]] = {}
         for market in markets:
             target = getattr(market, "episode_target", None)
+            history_context = f"tv:{target.series.lower()}" if target else ""
+            refresh_key = f"{market.phrase} @ {history_context}"
             if (target and target.episode > 1
                     and store.transcript_refresh_due(
-                        market.subject, market.phrase, refresh_hours,
+                        market.subject, refresh_key, refresh_hours,
                         source_kind="opensubtitles")):
                 grouped.setdefault(target, set()).add(
-                    (market.subject, market.phrase, market.context))
+                    (market.subject, market.phrase, history_context, refresh_key))
         if not grouped:
             return 0, 0, 0
 
@@ -157,13 +159,13 @@ class OpenSubtitlesHistory:
                 title = f"{target.series} S{target.season:02d}E{episode:02d}"
                 source_url = f"https://www.opensubtitles.com/en/subtitles/{file_id}"
                 date = datetime.now(timezone.utc).date().isoformat()
-                for subject, phrase, context in phrases:
+                for subject, phrase, context, refresh_key in phrases:
                     count = count_phrase(text, phrase)
                     rows += int(store.add_transcript_mention(
                         document_id, subject, phrase, context, count, date, title,
                         source_url, source_kind="opensubtitles"))
                     mentions += count
-                    refreshed.add((subject, phrase))
+                    refreshed.add((subject, refresh_key))
             if downloads >= max_downloads:
                 break
         for subject, phrase in refreshed:
