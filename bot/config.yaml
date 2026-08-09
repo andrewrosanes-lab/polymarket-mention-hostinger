@@ -51,7 +51,6 @@ tiers:
 risk:
   bankroll_usd: 100
   max_open_positions: 5
-  daily_loss_limit_usd: 10
   max_entry_price: 0.93
   min_entry_price: 0.16
   min_liquidity_usd: 800
