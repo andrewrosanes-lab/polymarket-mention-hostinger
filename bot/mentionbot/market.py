@@ -128,7 +128,7 @@ class PolymarketData:
         self._validate_tags()
         self._discover_by_tags(found, markers)
         if not self.cfg["discovery"].get("use_text_search_fallback", True):
-            return sorted(found.values(), key=lambda m: (m.end_date, -m.liquidity))[: int(self.cfg.get("max_candidates_per_cycle", 25))]
+            return self._rank_candidates(found.values())
         for query in self.cfg["discovery"]["queries"]:
             scanned = 0
             page = 1
@@ -145,8 +145,30 @@ class PolymarketData:
                 if not events or not pagination.get("hasMore"):
                     break
                 page += 1
-        ranked = sorted(found.values(), key=lambda m: (m.end_date, -m.liquidity))
-        return ranked[: int(self.cfg.get("max_candidates_per_cycle", 25))]
+        return self._rank_candidates(found.values())
+
+    def _rank_candidates(self, markets) -> list[Market]:
+        """Spend the cycle budget on contracts capable of clearing hard gates."""
+        risk = self.cfg["risk"]
+        now = datetime.now(timezone.utc)
+        max_hours = float(risk["max_hours_before_event"])
+
+        def rank(market: Market):
+            if market.event_start is None:
+                window_rank, unknown_rank = 0, 1
+            else:
+                hours = (market.event_start - now).total_seconds() / 3600
+                window_rank = 0 if hours <= max_hours else 1
+                unknown_rank = 0
+            capital_rank = 0 if (
+                market.liquidity >= float(risk["min_liquidity_usd"])
+                and market.volume >= float(risk["min_volume_usd"])
+            ) else 1
+            return (window_rank, capital_rank, unknown_rank, -market.liquidity,
+                    -market.volume, market.end_date)
+
+        limit = int(self.cfg.get("max_candidates_per_cycle", 100))
+        return sorted(markets, key=rank)[:limit]
 
     def resolved_observations(self) -> list[dict]:
         """Fetch deduplicated, definitively resolved mention outcomes from Gamma."""

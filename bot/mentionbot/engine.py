@@ -183,9 +183,7 @@ class Engine:
                 hits, total, history_scope = self.store.historical_pattern(
                     market.subject, market.phrase, history_context,
                     history_period, min_mentions,
-                    allow_broad_fallback=(
-                        market.episode_target is None and market.context != "nfl_game"
-                    ))
+                    allow_broad_fallback=False)
                 hist = historical_score(hits, total)
                 news_evidence = (self.news.score(market) if control["newsEnabled"]
                                  else NewsEvidence(50.0, 0, "disabled by dashboard"))
@@ -222,6 +220,10 @@ class Engine:
                     "modelEdge": round(score.model_edge_pct, 1),
                     "marketPrior": round(market_prior, 1),
                     "timingScore": round(score.timing_score, 1),
+                    "liquidity": round(market.liquidity, 2),
+                    "volume": round(market.volume, 2),
+                    "bookSpread": round(trade_book.spread_pct, 2),
+                    "entryAsk": round(trade_book.best_ask, 4),
                     "crossBookArb": round(score.cross_book_arb_pct, 1),
                     "arbConfidence": round(score.arb_confidence, 1),
                     "arbQualified": arb_ready,
