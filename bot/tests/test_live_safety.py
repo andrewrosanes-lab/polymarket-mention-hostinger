@@ -358,6 +358,29 @@ def test_risk_uses_executable_ask_not_cached_gamma_price():
     assert engine.risk_ok(market, score, book) == (False, "executable entry price gate")
 
 
+def test_discovery_prioritizes_tradeable_candidates_before_outside_window():
+    data = PolymarketData.__new__(PolymarketData)
+    data.cfg = {"max_candidates_per_cycle": 3, "risk": {
+        "max_hours_before_event": 4, "min_liquidity_usd": 800,
+        "min_volume_usd": 800}}
+    now = datetime.now(timezone.utc)
+
+    def candidate(condition, start, liquidity, volume):
+        return Market(condition, condition, "event", "slug", "event-slug",
+            start, now + timedelta(hours=12), "yes", "no", .5, .5,
+            liquidity, volume, False, "0.01", "Trump", "word", "speech")
+
+    liquid_near = candidate("liquid-near", now + timedelta(hours=2), 1200, 3000)
+    thin_near = candidate("thin-near", now + timedelta(hours=1), 200, 3000)
+    liquid_unknown = candidate("liquid-unknown", None, 1000, 2000)
+    liquid_late = candidate("liquid-late", now + timedelta(hours=8), 5000, 5000)
+
+    ranked = data._rank_candidates([
+        liquid_late, thin_near, liquid_unknown, liquid_near])
+    assert [market.condition_id for market in ranked] == [
+        "liquid-near", "liquid-unknown", "thin-near"]
+
+
 def test_arbitrage_is_detected_but_execution_remains_safety_locked():
     engine = Engine.__new__(Engine)
     engine.cfg = {

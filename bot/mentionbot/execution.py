@@ -12,6 +12,23 @@ class Fill:
     order_id: str | None
     price: float
     size_usd: float
+    shares: float
+
+
+def _response_fill(result: dict, side: str, fallback_price: float) -> Fill:
+    """Return only a confirmed CLOB fill using the actual exchanged amounts."""
+    if not isinstance(result, dict) or str(result.get("status", "")).lower() != "matched":
+        raise RuntimeError(f"order did not reach matched status: {result}")
+    making = float(result.get("makingAmount") or result.get("making_amount") or 0)
+    taking = float(result.get("takingAmount") or result.get("taking_amount") or 0)
+    order_id = result.get("orderID") or result.get("order_id")
+    if making <= 0 or taking <= 0:
+        raise RuntimeError(f"matched order omitted confirmed fill amounts: {result}")
+    if side == "BUY":
+        spent, shares = making, taking
+    else:
+        shares, spent = making, taking
+    return Fill(order_id, spent / shares if shares else fallback_price, spent, shares)
 
 
 class PaperExecutor:
@@ -20,13 +37,13 @@ class PaperExecutor:
     def buy(self, market: Market, side: str, usd: float, book: BookSignal) -> Fill:
         price = maker_price(book, market.tick_size,
                             self.cfg["execution"]["price_buffer_ticks"])
-        return Fill("paper-maker", price, usd)
+        return Fill("paper-maker", price, usd, usd / price)
 
     def sell(self, token_id: str, shares: float, price: float, tick_size: str,
              neg_risk: bool) -> Fill:
         slip = self.cfg["execution"]["paper_slippage_bps"] / 10_000
         fill_price = max(0.01, price * (1 - slip))
-        return Fill("paper-close", fill_price, shares * fill_price)
+        return Fill("paper-close", fill_price, shares * fill_price, shares)
 
 
 class LiveExecutor:
@@ -69,8 +86,8 @@ class LiveExecutor:
         )
         order_id = result.get("orderID") if isinstance(result, dict) else getattr(result, "order_id", None)
         status = result.get("status", "") if isinstance(result, dict) else getattr(result, "status", "")
-        if status == "matched":
-            return Fill(order_id, price, usd)
+        if status.lower() == "matched":
+            return _response_fill(result, "BUY", price)
         if not order_id:
             raise RuntimeError(f"maker order rejected: {result}")
 
@@ -80,7 +97,7 @@ class LiveExecutor:
             order = self.client.get_order(order_id)
             matched = float(order.get("size_matched") or 0)
             if matched >= shares * 0.999:
-                return Fill(order_id, price, matched * price)
+                return Fill(order_id, price, matched * price, matched)
 
         order = self.client.get_order(order_id)
         matched = float(order.get("size_matched") or 0)
@@ -88,7 +105,7 @@ class LiveExecutor:
         if matched > 0:
             # Do not submit a second leg after a partial maker fill; reconcile
             # only the confirmed maker shares to prevent accidental oversizing.
-            return Fill(order_id, price, matched * price)
+            return Fill(order_id, price, matched * price, matched)
 
         slippage_bps = taker_slippage_bps(book, self.cfg["execution"])
         max_price = min(0.99, book.best_ask * (1 + slippage_bps / 10_000))
@@ -98,11 +115,7 @@ class LiveExecutor:
             options=self.Options(tick_size=market.tick_size, neg_risk=market.neg_risk),
             order_type=self.OrderType.FAK,
         )
-        taker_status = taker.get("status", "") if isinstance(taker, dict) else getattr(taker, "status", "")
-        if taker_status != "matched":
-            raise RuntimeError(f"taker fallback did not fill: {taker}")
-        taker_id = taker.get("orderID") if isinstance(taker, dict) else getattr(taker, "order_id", None)
-        return Fill(taker_id, book.best_ask, usd)
+        return _response_fill(taker, "BUY", book.best_ask)
 
     def sell(self, token_id: str, shares: float, price: float, tick_size: str,
              neg_risk: bool) -> Fill:
@@ -114,8 +127,7 @@ class LiveExecutor:
             options=self.Options(tick_size=tick_size, neg_risk=neg_risk),
             order_type=self.OrderType.FAK,
         )
-        order_id = result.get("orderID") if isinstance(result, dict) else getattr(result, "order_id", None)
-        return Fill(order_id, price, shares * price)
+        return _response_fill(result, "SELL", price)
 
 
 def build(cfg: dict):
