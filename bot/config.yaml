@@ -5,7 +5,7 @@ allow_live_trading: true
 poll_interval_sec: 60
 max_markets_per_scan: 300
 max_candidates_per_cycle: 25
-minimum_confidence: 70
+minimum_confidence: 65
 
 probability_weights:
   historical_context: 0.35
@@ -46,7 +46,7 @@ subtitle_history:
   user_agent: "MentionEdge v1.0"
 
 tiers:
-  - {name: C, min_confidence: 70, max_confidence: 80, size_usd: 3}
+  - {name: C, min_confidence: 65, max_confidence: 80, size_usd: 3}
   - {name: B, min_confidence: 80, max_confidence: 90, size_usd: 4}
   - {name: A, min_confidence: 90, max_confidence: 100, size_usd: 5}
 

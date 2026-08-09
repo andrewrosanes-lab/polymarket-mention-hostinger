@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .execution import build
 from .market import PolymarketData
-from .news import NewsScorer
+from .news import NewsEvidence, NewsScorer
 from .scoring import combine, historical_score
 from .storage import Store
 from .transcript_history import GovInfoHistory, market_history_shape
@@ -28,6 +28,47 @@ class Engine:
         self.transcript_history = GovInfoHistory(cfg)
         self.subtitle_history = OpenSubtitlesHistory(cfg)
         self._last_history_refresh = 0.0
+        self._control_path = Path(os.getenv(
+            "MENTION_BOT_CONTROL_FILE", "state/control.json"))
+        self._runtime_control = self._control_defaults()
+
+    def _control_defaults(self) -> dict:
+        risk = self.cfg["risk"]
+        return {
+            "paused": False,
+            "minimumConfidence": float(self.cfg["minimum_confidence"]),
+            "minModelEdgePct": float(risk["min_model_edge_pct"]),
+            "minTimingScore": float(risk["min_timing_score"]),
+            "maxHoursBeforeEvent": float(risk["max_hours_before_event"]),
+            "newsEnabled": bool(self.cfg["news"]["enabled"]),
+        }
+
+    def _load_runtime_control(self) -> dict:
+        defaults = self._control_defaults()
+        try:
+            if not self._control_path.exists():
+                return defaults
+            payload = json.loads(self._control_path.read_text())
+            control = {**defaults, **payload}
+            limits = {
+                "minimumConfidence": (65, 90),
+                "minModelEdgePct": (6, 20),
+                "minTimingScore": (45, 90),
+                "maxHoursBeforeEvent": (1, 4),
+            }
+            for key, (lower, upper) in limits.items():
+                value = float(control[key])
+                if not lower <= value <= upper:
+                    raise ValueError(f"{key} outside safe range")
+                control[key] = value
+            control["paused"] = bool(control["paused"])
+            control["newsEnabled"] = bool(control["newsEnabled"])
+            return control
+        except Exception:
+            # A malformed or partially-written control file must never loosen
+            # entry gates. Position management continues while entries pause.
+            log.exception("invalid dashboard control; pausing new entries")
+            return {**defaults, "paused": True}
 
     def refresh_history(self) -> None:
         historical = self.cfg.get("historical") or {}
@@ -49,20 +90,29 @@ class Engine:
         except Exception:
             log.exception("historical Gamma refresh failed; retaining existing history")
 
-    def risk_ok(self, market, score, book) -> tuple[bool, str]:
+    def risk_ok(self, market, score, book, control: dict | None = None) -> tuple[bool, str]:
         r = self.cfg["risk"]
+        control = control or getattr(self, "_runtime_control", {
+            "minTimingScore": float(r["min_timing_score"]),
+            "minModelEdgePct": float(r["min_model_edge_pct"]),
+            "maxHoursBeforeEvent": float(r["max_hours_before_event"]),
+        })
         if os.path.exists(r["kill_switch_file"]): return False, "kill switch"
         if len(self.store.open_positions()) >= r["max_open_positions"]: return False, "max positions"
         if market.liquidity < r["min_liquidity_usd"]: return False, "low liquidity"
         if market.volume < r["min_volume_usd"]: return False, "low traded volume"
         if book.spread_pct > r["max_spread_pct"]: return False, "wide spread"
-        if score.timing_score < r["min_timing_score"]: return False, "timing score below 45"
-        if score.model_edge_pct < r["min_model_edge_pct"]: return False, "model edge below 6%"
+        min_timing = float(control["minTimingScore"])
+        min_edge = float(control["minModelEdgePct"])
+        if score.timing_score < min_timing:
+            return False, f"timing score below {min_timing:g}"
+        if score.model_edge_pct < min_edge:
+            return False, f"model edge below {min_edge:g}%"
         if market.event_start is None:
             if r["require_known_event_start"]: return False, "unknown event start"
         else:
             hours = (market.event_start - datetime.now(timezone.utc)).total_seconds()/3600
-            max_hours = float(r["max_hours_before_event"])
+            max_hours = float(control["maxHoursBeforeEvent"])
             if hours > max_hours:
                 return False, f"more than {max_hours:g} hours before event"
         if not r["min_entry_price"] <= book.best_ask <= r["max_entry_price"]:
@@ -100,6 +150,8 @@ class Engine:
         return True, "qualified"
 
     def tick(self) -> None:
+        self._runtime_control = self._load_runtime_control()
+        control = self._runtime_control
         self.refresh_history()
         markets = self.data.discover()
         try:
@@ -135,7 +187,8 @@ class Engine:
                         market.episode_target is None and market.context != "nfl_game"
                     ))
                 hist = historical_score(hits, total)
-                news_evidence = self.news.score(market)
+                news_evidence = (self.news.score(market) if control["newsEnabled"]
+                                 else NewsEvidence(50.0, 0, "disabled by dashboard"))
                 momentum = self.data.momentum(market.yes_token, market.yes_price)
                 midpoint = ((book.best_bid + book.best_ask) / 2
                             if book.best_ask >= book.best_bid else market.yes_price)
@@ -145,10 +198,13 @@ class Engine:
                                 self.cfg, news_evidence.count, history_scope, total)
                 log.info("%s | %s %.1f | %s", market.question, score.side, score.confidence, score.explanation)
                 trade_book = book if score.side == "YES" else no_book
-                if score.confidence < self.cfg["minimum_confidence"] or not score.tier:
-                    ok, reason = False, "confidence below 70%"
+                minimum_confidence = float(control["minimumConfidence"])
+                if control["paused"]:
+                    ok, reason = False, "new entries paused from dashboard"
+                elif score.confidence < minimum_confidence or not score.tier:
+                    ok, reason = False, f"confidence below {minimum_confidence:g}%"
                 else:
-                    ok, reason = self.risk_ok(market, score, trade_book)
+                    ok, reason = self.risk_ok(market, score, trade_book, control)
                 arb_ready, arb_reason = self.arbitrage_status(
                     market, book, no_book, score.cross_book_arb_pct)
                 signals.append({
@@ -167,6 +223,7 @@ class Engine:
                     "marketPrior": round(market_prior, 1),
                     "timingScore": round(score.timing_score, 1),
                     "crossBookArb": round(score.cross_book_arb_pct, 1),
+                    "arbConfidence": round(score.arb_confidence, 1),
                     "arbQualified": arb_ready,
                     "arbExecutable": bool(
                         arb_ready and (self.cfg.get("arbitrage") or {}).get("execution_enabled")),
@@ -212,6 +269,7 @@ class Engine:
                     "maxPositionsPerContract": (self.cfg.get("risk") or {}).get(
                         "max_positions_per_condition", 2),
                 },
+                "control": getattr(self, "_runtime_control", self._control_defaults()),
             }
             temporary = path.with_suffix(path.suffix + ".tmp")
             temporary.write_text(json.dumps(payload, separators=(",", ":")))

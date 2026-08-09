@@ -53,3 +53,4 @@ class Score:
     cross_book_arb_pct: float
     explanation: str
     timing_score: float = 50.0
+    arb_confidence: float = 0.0

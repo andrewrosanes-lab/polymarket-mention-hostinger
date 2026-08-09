@@ -242,6 +242,45 @@ def test_probability_is_separate_from_book_timing():
     assert weak.timing_score < strong.timing_score
 
 
+def test_unavailable_news_is_excluded_instead_of_diluting_probability():
+    cfg = {"probability_weights": {"historical_context": .35,
+                                    "news_live_impact": .25, "market_prior": .14},
+           "timing_weights": {"order_book_imbalance": .20, "momentum": .14},
+           "tiers": [{"name": "C", "min_confidence": 65,
+                      "max_confidence": 80, "size_usd": 3}]}
+    market = Market("c", "q", "e", "s", "es", None,
+        datetime.now(timezone.utc) + timedelta(hours=2), "y", "n", .5, .5,
+        1000, 1000, False, "0.01", "Trump", "word", "speech")
+    yes_book = BookSignal(60, .39, .40, 2, 100, 100)
+    no_book = BookSignal(40, .59, .60, 2, 100, 100)
+    unavailable = combine(market, yes_book, no_book, 80, 50, 65, 60,
+                          cfg, 0, "exact", 12)
+    observed_neutral = combine(market, yes_book, no_book, 80, 50, 65, 60,
+                               cfg, 1, "exact", 12)
+    assert unavailable.yes_probability > observed_neutral.yes_probability
+    assert unavailable.tier == "C"
+
+
+def test_arbitrage_has_separate_execution_confidence_not_directional_boost():
+    cfg = {"probability_weights": {"historical_context": .35,
+                                    "news_live_impact": .25, "market_prior": .14},
+           "timing_weights": {"order_book_imbalance": .20, "momentum": .14},
+           "tiers": [{"name": "C", "min_confidence": 65,
+                      "max_confidence": 80, "size_usd": 3}],
+           "arbitrage": {"min_edge_pct": 6}}
+    market = Market("c", "q", "e", "s", "es", None,
+        datetime.now(timezone.utc) + timedelta(hours=2), "y", "n", .5, .5,
+        1000, 1000, False, "0.01", "Trump", "word", "speech")
+    yes_book = BookSignal(60, .44, .45, 2, 100, 100)
+    no_book = BookSignal(40, .47, .48, 2, 100, 100)
+    score = combine(market, yes_book, no_book, 75, 50, 60, 60,
+                    cfg, 0, "exact", 12)
+    assert round(score.cross_book_arb_pct) == 7
+    assert score.arb_confidence > 75
+    expected_probability = (75 * .35 + 60 * .14) / (.35 + .14)
+    assert score.yes_probability == expected_probability
+
+
 def test_official_transcript_counts_only_president_and_overrides_gamma(tmp_path):
     raw = """<html><body>
       <p class="s1">Administration of Donald J. Trump, 2026</p>
@@ -348,11 +387,28 @@ def test_dashboard_status_is_atomic_and_contains_operational_evidence(tmp_path):
     store.record_position("c", "t", "YES", 3, .3, "o", "Question",
                           "2030-01-01T00:00:00+00:00", "0.01", False)
     engine = Engine.__new__(Engine)
-    engine.cfg = {"mode": "live", "paths": {"status": str(tmp_path / "status.json")}}
+    engine.cfg = {"mode": "live", "minimum_confidence": 65,
+                  "news": {"enabled": True},
+                  "risk": {"min_model_edge_pct": 6, "min_timing_score": 45,
+                           "max_hours_before_event": 4},
+                  "paths": {"status": str(tmp_path / "status.json")}}
     engine.store = store
     engine.write_status([object()], [{"confidence": 71.0, "question": "Question"}])
     status = json.loads((tmp_path / "status.json").read_text())
     assert status["connected"] is True and status["mode"] == "LIVE"
     assert status["markets"] == 1 and status["positions"] == 1
     assert status["deployed"] == 3 and status["evidence"]["gammaObservations"] == 1
+    assert status["control"]["minimumConfidence"] == 65
     assert not (tmp_path / "status.json.tmp").exists()
+
+
+def test_invalid_dashboard_control_fails_closed(tmp_path):
+    engine = Engine.__new__(Engine)
+    engine.cfg = {"minimum_confidence": 65, "news": {"enabled": True},
+                  "risk": {"min_model_edge_pct": 6, "min_timing_score": 45,
+                           "max_hours_before_event": 4}}
+    engine._control_path = tmp_path / "control.json"
+    engine._control_path.write_text('{"minimumConfidence": 10}')
+    control = engine._load_runtime_control()
+    assert control["paused"] is True
+    assert control["minimumConfidence"] == 65

@@ -16,15 +16,20 @@ with the weather bot.
 | Hard gate | Pricing edge | 6 percentage points | Model probability versus executable ask |
 
 The probability components are normalized into a YES probability. It buys YES
-when confidence is 70–100, or NO when inverted confidence is 70–100, only when
+when confidence is 65–100, or NO when inverted confidence is 65–100, only when
 timing is at least 45 and executable model edge is at least six percentage
 points. Scores in the middle do not trade.
 
 | Tier | Confidence | Position |
 |---|---:|---:|
-| C | 70–<80 | $3 |
+| C | 65–<80 | $3 |
 | B | 80–<90 | $4 |
 | A | 90–100 | $5 |
+
+The authenticated dashboard may tighten Tier C's effective minimum up to 90,
+but can never lower it below 65. It can also tighten model edge, timing, and
+the known-event window, disable news participation, or pause new entries.
+Position monitoring remains active while entries are paused.
 
 The news component is a transparent headline heuristic, not human-level news
 understanding. Historical data is segmented by context (`speech`, `debate`,
@@ -50,8 +55,11 @@ not per transcript. Numeric wording such as “10+ times” is also preserved as
 count threshold instead of being reduced to a simple mentioned/not-mentioned
 flag.
 
-“Pricing edge” is not arbitrage. The bot separately qualifies gross cross-book
-arbitrage as `1 - YES ask - NO ask` at 6% or more. It reports qualified
+When no grounded news items exist, news is marked unavailable and excluded
+from probability instead of contributing a misleading neutral 50. “Pricing
+edge” is not arbitrage. The bot separately qualifies gross cross-book
+arbitrage as `1 - YES ask - NO ask` at 6% or more and reports a distinct
+paired-execution confidence metric based on arb edge and both book spreads. It reports qualified
 opportunities as `ARB WATCH`; live paired execution is safety-locked because a
 batch of two FOK orders is not documented as atomic across both outcome legs.
 
