@@ -205,27 +205,13 @@ class Store:
                             "lower(subject)=lower(?) AND lower(phrase)=lower(?)",
                             (subject, phrase)))
         for base_scope, where, params in queries:
-            if period == "week":
-                row = self.db.execute(
-                    f"""SELECT COUNT(*) n,
-                        COALESCE(SUM(CASE WHEN period_mentions >= ? THEN 1 ELSE 0 END),0) hits
-                        FROM (
-                          SELECT strftime('%Y-%W', document_date) period_key,
-                                 SUM(mention_count) period_mentions
-                          FROM transcript_mentions WHERE {where} AND document_date != ''
-                          GROUP BY period_key
-                        )""",
-                    (int(min_mentions), *params),
-                ).fetchone()
-                scope = base_scope.replace("official transcript", "official transcript weekly")
-            else:
-                row = self.db.execute(
-                    f"""SELECT COUNT(*) n,
-                        COALESCE(SUM(CASE WHEN mention_count >= ? THEN 1 ELSE 0 END),0) hits
-                        FROM transcript_mentions WHERE {where}""",
-                    (int(min_mentions), *params),
-                ).fetchone()
-                scope = base_scope
+            row = self.db.execute(
+                f"""SELECT COUNT(*) n,
+                    COALESCE(SUM(CASE WHEN mention_count >= ? THEN 1 ELSE 0 END),0) hits
+                    FROM transcript_mentions WHERE {where}""",
+                (int(min_mentions), *params),
+            ).fetchone()
+            scope = base_scope
             if int(row["n"]):
                 kinds = self.db.execute(
                     f"SELECT GROUP_CONCAT(DISTINCT source_kind) kinds "

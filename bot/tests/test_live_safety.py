@@ -311,8 +311,8 @@ def test_phrase_alternatives_are_counted_as_or():
     assert count_phrase("Karoline spoke. Leavitt answered.", "Karoline | Leavitt") == 2
 
 
-def test_weekly_history_and_count_threshold_match_market_wording(tmp_path):
-    assert market_history_shape('Will Trump say "war" 5+ times this week?') == ("week", 5)
+def test_history_uses_comparable_events_not_calendar_weeks(tmp_path):
+    assert market_history_shape('Will Trump say "war" 5+ times this week?') == ("event", 5)
     store = Store(str(tmp_path / "weekly.db"), str(tmp_path / "journal.jsonl"))
     for doc, date, count in (("d1", "2026-08-03", 3), ("d2", "2026-08-04", 2),
                              ("d3", "2026-07-27", 4)):
@@ -320,8 +320,8 @@ def test_weekly_history_and_count_threshold_match_market_wording(tmp_path):
                                      date, "Remarks", f"https://example/{doc}")
     hits, total, scope = store.historical_pattern(
         "Trump", "war", "speech", period="week", min_mentions=5)
-    assert (hits, total) == (1, 2)
-    assert scope == "official transcript weekly phrase/context"
+    assert (hits, total) == (0, 3)
+    assert scope == "official transcript phrase/context"
 
 
 def test_episode_metadata_and_subtitle_cleanup():

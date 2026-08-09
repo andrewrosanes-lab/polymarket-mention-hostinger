@@ -87,11 +87,10 @@ def count_phrase(text: str, phrase: str) -> int:
 
 
 def market_history_shape(question: str) -> tuple[str, int]:
-    """Match historical units and count thresholds to the market wording."""
+    """Treat every comparable past event as one historical observation."""
     lower = question.lower()
-    period = "week" if "this week" in lower else "event"
     threshold = re.search(r"\b(\d+)\s*\+\s*times?\b", lower)
-    return period, int(threshold.group(1)) if threshold else 1
+    return "event", int(threshold.group(1)) if threshold else 1
 
 
 def parse_govinfo_transcript(document_id: str, raw_html: str) -> Transcript | None:
