@@ -9,9 +9,8 @@ with the weather bot.
 | Role | Component | Relative weight | Method |
 |---|---|---:|---|
 | Probability | Context-matched historical mentions | 35 | Beta-smoothed hit rate from official GovInfo presidential transcripts, with resolved Gamma markets as fallback |
-| Probability | News/live impact | 25 | Grounded, deduplicated Google News RSS headlines with time decay |
 | Probability | Market prior | 14 | Current executable-book midpoint |
-| Timing | Order-book imbalance | 20 | Bid versus ask notional near top-of-book |
+| Confidence confirmation | Order-book imbalance | bounded | Three consecutive samples, capped at ±5 confidence points |
 | Timing | Momentum | 14 | Selected outcome's recent price direction |
 | Hard gate | Pricing edge | 6 percentage points | Model probability versus executable ask |
 
@@ -28,11 +27,10 @@ points. Scores in the middle do not trade.
 
 The authenticated dashboard may tighten Tier C's effective minimum up to 90,
 but can never lower it below 65. It can also tighten model edge, timing, and
-the known-event window, disable news participation, or pause new entries.
-Position monitoring remains active while entries are paused.
+the known-event window, or pause new entries. Resolution reconciliation remains
+active while entries are paused.
 
-The news component is a transparent headline heuristic, not human-level news
-understanding. Historical data is segmented by context (`speech`, `debate`,
+Historical data is segmented by context (`speech`, `debate`,
 `interview`, `press_conference`, `nfl_game`, or `other`).
 
 For Trump markets, the bot reads the official GovInfo Daily Compilation of
@@ -55,31 +53,24 @@ not per transcript. Numeric wording such as “10+ times” is also preserved as
 count threshold instead of being reduced to a simple mentioned/not-mentioned
 flag.
 
-When no grounded news items exist, news is marked unavailable and excluded
-from probability instead of contributing a misleading neutral 50. “Pricing
-edge” is not arbitrage. The bot separately qualifies gross cross-book
-arbitrage as `1 - YES ask - NO ask` at 6% or more and reports a distinct
-paired-execution confidence metric based on arb edge and both book spreads. It reports qualified
-opportunities as `ARB WATCH`; live paired execution is safety-locked because a
-batch of two FOK orders is not documented as atomic across both outcome legs.
+News and arbitrage are excluded from both confidence and dashboard indicators.
+Liquidity and volume are execution-capacity gates only.
 
 ## Safety defaults
 
 - Live-only execution with a separate owner-approval lock; it never silently paper trades
-- Five total open positions and no more than two entries per contract
+- Five total open positions and one lifetime entry per condition
+- One entry per normalized subject/phrase per UTC day
 - Liquidity, spread, entry-price, and time gates
 - Minimum six-percentage-point modeled edge over the executable ask
 - Minimum timing score of 45
-- At least $800 liquidity and $800 traded volume
+- At least $200 liquidity and $200 traded volume (not confidence inputs)
 - Entry prices restricted to $0.16–$0.93
-- Entries with known starts only from four hours before the event through the
-  live event; markets without a published start time remain eligible
-- Multiple entries are tracked separately, capped at two per contract, and
-  still count against the five-position limit
+- Entries require a known start no more than eight hours away
 - Post-only GTC maker order first; cancel then FAK taker fallback after 20 seconds
 - Taker fallback slippage dynamically bounded between 1% and 3%
-- Entries from $0.16–$0.37 use both a 50% hard stop and 50% trailing drawdown
-- 30% take profit, 25% stop, exit 15 minutes before scheduled resolution
+- No stop-loss, take-profit, trailing-stop, or pre-resolution exit
+- Hold through resolution and reconcile resolved/redeemable wallet positions
 - `state/HALT` kill switch
 - SQLite state and JSONL journal
 
@@ -101,8 +92,8 @@ fallback. Populate resolved, context-matched history:
 ```
 
 For speech/game markets whose actual start is absent from Gamma, add the event
-slug and verified UTC start time under `scheduled_events`. Unknown starts remain
-eligible as previously approved; known starts must be within four hours.
+slug and verified UTC start time under `scheduled_events`. Unknown starts are
+skipped; verified starts must be within eight hours.
 
 ## Live lock
 
@@ -124,6 +115,6 @@ Never paste or commit the private key. The sample VPS unit is
 This is experimental trading software, not a profit guarantee. Exact market
 resolution wording and source transcripts control settlement. Maker orders are
 polled and reconciled before a position is journaled; a partial maker fill does
-not trigger a second full-size taker leg. Automatic redemption and atomic
-two-leg arbitrage are not included; the default strategy exits before the
-scheduled end.
+not trigger a second full-size taker leg. The taker fallback is cancelled if
+slippage removes the required edge. Proxy-wallet auto-redemption is not guessed:
+resolved tokens are marked redeemable for an official/manual redemption flow.

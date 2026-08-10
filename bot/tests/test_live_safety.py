@@ -49,15 +49,17 @@ def test_partial_exit_keeps_remaining_position_open(tmp_path):
     assert round(row["size_usd"], 4) == 2.4
 
 
-def test_repeated_condition_entries_remain_separate_and_counted(tmp_path):
+def test_repeated_condition_entry_is_rejected(tmp_path):
     store = Store(str(tmp_path / "state.db"), str(tmp_path / "journal.jsonl"))
-    for order in ("first", "second"):
-        store.record_position("c", "t", "YES", 3, .3, order, "Question",
-                              "2030-01-01T00:00:00+00:00", "0.01", False)
+    store.record_position("c", "t", "YES", 3, .3, "first", "Question",
+                          "2030-01-01T00:00:00+00:00", "0.01", False,
+                          "Trump", "word")
+    with pytest.raises(RuntimeError, match="condition already entered"):
+        store.record_position("c", "t", "YES", 3, .3, "second", "Question",
+                              "2030-01-01T00:00:00+00:00", "0.01", False,
+                              "Trump", "other")
     positions = store.open_positions()
-    assert len(positions) == 2
-    assert len({row["position_id"] for row in positions}) == 2
-    assert {row["order_id"] for row in positions} == {"first", "second"}
+    assert len(positions) == 1 and positions[0]["order_id"] == "first"
 
 
 def test_legacy_position_table_migrates_without_losing_open_trade(tmp_path):
@@ -84,9 +86,10 @@ def test_legacy_position_table_migrates_without_losing_open_trade(tmp_path):
     legacy = store.open_positions()[0]
     assert legacy["position_id"] > 0
     assert legacy["condition_id"] == "c" and legacy["order_id"] == "old"
-    store.record_position("c", "t", "YES", 4, .4, "new", "Question",
-                          "2030-01-01T00:00:00Z", "0.01", False)
-    assert len(store.open_positions()) == 2
+    with pytest.raises(RuntimeError, match="condition already entered"):
+        store.record_position("c", "t", "YES", 4, .4, "new", "Question",
+                              "2030-01-01T00:00:00Z", "0.01", False)
+    assert len(store.open_positions()) == 1
 
 
 def test_historical_observations_are_resolved_and_deduplicated(tmp_path):
@@ -146,6 +149,20 @@ def test_subtitle_history_does_not_leak_between_series(tmp_path):
         "Anyone", "Power", "tv:house of the dragon", allow_broad_fallback=False)
     assert (hits, total) == (0, 0)
     assert scope == "neutral — no phrase-level evidence"
+
+
+def test_exact_subject_phrase_can_fallback_across_non_tv_contexts(tmp_path):
+    store = Store(str(tmp_path / "history.db"), str(tmp_path / "history.jsonl"))
+    store.add_transcript_mention(
+        "govinfo:1", "Trump", "Gaza", "speech", 1,
+        "2026-08-01", "Remarks", "https://www.govinfo.gov/example",
+        source_kind="govinfo")
+
+    hits, total, scope = store.historical_pattern(
+        "Trump", "Gaza", "other", allow_broad_fallback=False)
+
+    assert (hits, total) == (1, 1)
+    assert "cross-context" in scope
 
 
 def test_news_requires_event_entity_and_phrase_and_deduplicates():
@@ -236,13 +253,13 @@ def test_probability_is_separate_from_book_timing():
     weak_book = BookSignal(10, .39, .40, 2, 100, 100)
     strong_book = BookSignal(90, .39, .40, 2, 100, 100)
     no_book = BookSignal(50, .59, .60, 2, 100, 100)
-    weak = combine(market, weak_book, no_book, 80, 70, 65, 60, cfg, 1)
-    strong = combine(market, strong_book, no_book, 80, 70, 65, 60, cfg, 1)
+    weak = combine(market, weak_book, no_book, 80, 65, 60, cfg, "exact", 1)
+    strong = combine(market, strong_book, no_book, 80, 65, 60, cfg, "exact", 1)
     assert weak.yes_probability == strong.yes_probability
     assert weak.timing_score < strong.timing_score
 
 
-def test_unavailable_news_is_excluded_instead_of_diluting_probability():
+def test_probability_uses_history_and_market_prior_only():
     cfg = {"probability_weights": {"historical_context": .35,
                                     "news_live_impact": .25, "market_prior": .14},
            "timing_weights": {"order_book_imbalance": .20, "momentum": .14},
@@ -253,32 +270,35 @@ def test_unavailable_news_is_excluded_instead_of_diluting_probability():
         1000, 1000, False, "0.01", "Trump", "word", "speech")
     yes_book = BookSignal(60, .39, .40, 2, 100, 100)
     no_book = BookSignal(40, .59, .60, 2, 100, 100)
-    unavailable = combine(market, yes_book, no_book, 80, 50, 65, 60,
-                          cfg, 0, "exact", 12)
-    observed_neutral = combine(market, yes_book, no_book, 80, 50, 65, 60,
-                               cfg, 1, "exact", 12)
-    assert unavailable.yes_probability > observed_neutral.yes_probability
-    assert unavailable.tier == "C"
+    score = combine(market, yes_book, no_book, 80, 65, 60,
+                    cfg, "exact", 12)
+    assert score.yes_probability == (80 * .35 + 65 * .14) / (.35 + .14)
+    assert score.tier == "C"
 
 
-def test_arbitrage_has_separate_execution_confidence_not_directional_boost():
+def test_persistent_book_confirmation_is_bounded_and_arbitrage_is_absent():
     cfg = {"probability_weights": {"historical_context": .35,
                                     "news_live_impact": .25, "market_prior": .14},
            "timing_weights": {"order_book_imbalance": .20, "momentum": .14},
+           "book_confidence": {"required_samples": 3, "sample_window": 5,
+                               "adjustment_scale": .10,
+                               "max_adjustment_points": 5},
            "tiers": [{"name": "C", "min_confidence": 65,
-                      "max_confidence": 80, "size_usd": 3}],
-           "arbitrage": {"min_edge_pct": 6}}
+                      "max_confidence": 80, "size_usd": 3}]}
     market = Market("c", "q", "e", "s", "es", None,
         datetime.now(timezone.utc) + timedelta(hours=2), "y", "n", .5, .5,
         1000, 1000, False, "0.01", "Trump", "word", "speech")
     yes_book = BookSignal(60, .44, .45, 2, 100, 100)
     no_book = BookSignal(40, .47, .48, 2, 100, 100)
-    score = combine(market, yes_book, no_book, 75, 50, 60, 60,
-                    cfg, 0, "exact", 12)
-    assert round(score.cross_book_arb_pct) == 7
-    assert score.arb_confidence > 75
+    base = combine(market, yes_book, no_book, 75, 60, 60,
+                   cfg, "exact", 12, 100, 2)
+    score = combine(market, yes_book, no_book, 75, 60, 60,
+                    cfg, "exact", 12, 100, 3)
     expected_probability = (75 * .35 + 60 * .14) / (.35 + .14)
     assert score.yes_probability == expected_probability
+    assert base.book_adjustment == 0
+    assert score.book_adjustment == 5
+    assert score.confidence <= (expected_probability + 5)
 
 
 def test_official_transcript_counts_only_president_and_overrides_gamma(tmp_path):
@@ -344,16 +364,17 @@ def test_risk_uses_executable_ask_not_cached_gamma_price():
     engine.cfg = {"risk": {"kill_switch_file": "/never", "max_open_positions": 5,
         "min_liquidity_usd": 800, "min_volume_usd": 800, "max_spread_pct": 12,
         "min_timing_score": 45, "min_model_edge_pct": 6, "require_known_event_start": False,
-        "max_hours_before_event": 4, "min_entry_price": .16, "max_entry_price": .93,
-        "max_positions_per_condition": 2}}
+        "max_hours_before_event": 8, "min_entry_price": .16, "max_entry_price": .93,
+        "max_positions_per_condition": 1}}
     engine.store = type("S", (), {"open_positions": lambda self: [],
         "daily_loss": lambda self: -999,
-        "open_position_count": lambda self, c: 0})()
+        "open_position_count": lambda self, c: 0,
+        "entry_allowed": lambda self, c, s, p: (True, "ok")})()
     market = Market("c", "q", "e", "s", "es",
         datetime.now(timezone.utc) + timedelta(minutes=30),
         datetime.now(timezone.utc) + timedelta(hours=3), "y", "n", .5, .5,
         1000, 1000, False, "0.01", "Trump", "word", "speech")
-    score = Score(80, 80, "YES", "B", 4, 50, 50, 50, 50, 50, 10, 0, "")
+    score = Score(80, 80, "YES", "B", 4, 50, 50, 50, 50, 10, "")
     book = BookSignal(50, .93, .95, 2, 1000, 1000)
     assert engine.risk_ok(market, score, book) == (False, "executable entry price gate")
 
@@ -381,27 +402,34 @@ def test_discovery_prioritizes_tradeable_candidates_before_outside_window():
         "liquid-near", "liquid-unknown", "thin-near"]
 
 
-def test_arbitrage_is_detected_but_execution_remains_safety_locked():
-    engine = Engine.__new__(Engine)
-    engine.cfg = {
-        "arbitrage": {"enabled": True, "execution_enabled": False,
-                      "min_edge_pct": 6, "bundle_size_usd": 5},
-        "risk": {"kill_switch_file": "/never", "max_open_positions": 5,
-                 "min_cross_book_arb_pct": 6, "min_liquidity_usd": 800,
-                 "min_volume_usd": 800, "max_spread_pct": 12,
-                 "min_entry_price": .16, "max_entry_price": .93,
-                 "max_hours_before_event": 4},
-    }
-    engine.store = type("S", (), {"open_positions": lambda self: [],
-        "open_position_count": lambda self, condition: 0})()
-    market = Market("c", "q", "e", "s", "es", None,
-        datetime.now(timezone.utc) + timedelta(hours=2), "y", "n", .45, .48,
-        1000, 1000, False, "0.01", "Trump", "word", "speech")
-    yes_book = BookSignal(50, .44, .45, 2, 1000, 1000)
-    no_book = BookSignal(50, .47, .48, 2, 1000, 1000)
-    assert engine.arbitrage_status(market, yes_book, no_book, 7) == (
-        True, "qualified arb watch — paired execution safety lock")
-    assert engine.arbitrage_status(market, yes_book, no_book, 5)[0] is False
+def test_entry_locks_are_lifetime_per_condition_and_daily_per_word(tmp_path):
+    store = Store(str(tmp_path / "locks.db"), str(tmp_path / "journal.jsonl"))
+    today = datetime.now(timezone.utc).date().isoformat()
+    tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+    assert store.entry_allowed("c1", "Donald Trump", "War | Peace", today) == (
+        True, "ok")
+    store.record_position("c1", "t", "NO", 3, .3, "o", "Question",
+                          "2030-01-01T00:00:00Z", "0.01", False,
+                          "Donald Trump", "Peace | War")
+    assert store.entry_allowed("c1", "Donald Trump", "Other", tomorrow) == (
+        False, "condition already entered")
+    assert store.entry_allowed("c2", "Donald Trump", "War | Peace", today) == (
+        False, "word mention already entered today")
+    assert store.entry_allowed("c2", "Donald Trump", "War | Peace", tomorrow) == (
+        True, "ok")
+
+
+def test_resolution_settlement_releases_slot_without_early_sell(tmp_path):
+    store = Store(str(tmp_path / "settle.db"), str(tmp_path / "journal.jsonl"))
+    store.record_position("c", "t", "YES", 3, .3, "o", "Question",
+                          "2030-01-01T00:00:00Z", "0.01", False,
+                          "Trump", "word")
+    position_id = store.open_positions()[0]["position_id"]
+    pnl = store.settle_position(position_id, 1.0, "redeemable", "market")
+    assert round(pnl, 2) == 7.0
+    assert store.open_positions() == []
+    row = store.redeemable_positions()[0]
+    assert row["status"] == "resolved" and row["redemption_status"] == "redeemable"
 
 
 def test_dashboard_status_is_atomic_and_contains_operational_evidence(tmp_path):
@@ -411,9 +439,8 @@ def test_dashboard_status_is_atomic_and_contains_operational_evidence(tmp_path):
                           "2030-01-01T00:00:00+00:00", "0.01", False)
     engine = Engine.__new__(Engine)
     engine.cfg = {"mode": "live", "minimum_confidence": 65,
-                  "news": {"enabled": True},
                   "risk": {"min_model_edge_pct": 6, "min_timing_score": 45,
-                           "max_hours_before_event": 4},
+                           "max_hours_before_event": 8},
                   "paths": {"status": str(tmp_path / "status.json")}}
     engine.store = store
     engine.write_status([object()], [{"confidence": 71.0, "question": "Question"}])
@@ -427,9 +454,9 @@ def test_dashboard_status_is_atomic_and_contains_operational_evidence(tmp_path):
 
 def test_invalid_dashboard_control_fails_closed(tmp_path):
     engine = Engine.__new__(Engine)
-    engine.cfg = {"minimum_confidence": 65, "news": {"enabled": True},
+    engine.cfg = {"minimum_confidence": 65,
                   "risk": {"min_model_edge_pct": 6, "min_timing_score": 45,
-                           "max_hours_before_event": 4}}
+                           "max_hours_before_event": 8}}
     engine._control_path = tmp_path / "control.json"
     engine._control_path.write_text('{"minimumConfidence": 10}')
     control = engine._load_runtime_control()

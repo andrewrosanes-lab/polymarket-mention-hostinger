@@ -10,7 +10,6 @@ type Control = {
   minModelEdgePct: number;
   minTimingScore: number;
   maxHoursBeforeEvent: number;
-  newsEnabled: boolean;
   updatedAt?: string;
 };
 
@@ -19,8 +18,7 @@ const defaults: Control = {
   minimumConfidence: 65,
   minModelEdgePct: 6,
   minTimingScore: 45,
-  maxHoursBeforeEvent: 4,
-  newsEnabled: true,
+  maxHoursBeforeEvent: 8,
 };
 
 const headers = { "Cache-Control": "no-store" };
@@ -70,8 +68,7 @@ export async function POST(request: Request) {
       minimumConfidence: bounded(body.minimumConfidence, "Confidence", 65, 90),
       minModelEdgePct: bounded(body.minModelEdgePct, "Model edge", 6, 20),
       minTimingScore: bounded(body.minTimingScore, "Timing score", 45, 90),
-      maxHoursBeforeEvent: bounded(body.maxHoursBeforeEvent, "Entry window", 1, 4),
-      newsEnabled: Boolean(body.newsEnabled),
+      maxHoursBeforeEvent: bounded(body.maxHoursBeforeEvent, "Entry window", 1, 8),
       updatedAt: new Date().toISOString(),
     };
     const path = controlFile();

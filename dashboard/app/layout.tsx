@@ -24,7 +24,7 @@ export async function generateMetadata(): Promise<Metadata> {
     description: "Separated probability, timing, edge, and exposure for live mention markets",
     openGraph: {
       title: "Mention Edge — Polymarket Console",
-      description: "Probability, timing, edge, directional routing, and arbitrage monitoring",
+      description: "Historical mention probability, persistent book confirmation, and maker-first execution",
       images: [{ url: image, width: 1200, height: 630 }],
     },
     twitter: {

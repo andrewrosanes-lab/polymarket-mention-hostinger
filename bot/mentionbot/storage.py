@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,19 @@ CREATE TABLE IF NOT EXISTS positions (
   ,end_date TEXT
   ,tick_size TEXT NOT NULL DEFAULT '0.01'
   ,neg_risk INTEGER NOT NULL DEFAULT 0
+  ,subject_key TEXT NOT NULL DEFAULT ''
+  ,phrase_key TEXT NOT NULL DEFAULT ''
+  ,closed_at TEXT
+  ,exit_price REAL
+  ,realized_pnl REAL
+  ,redemption_status TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS entry_locks (
+  condition_id TEXT PRIMARY KEY,
+  subject_key TEXT NOT NULL,
+  phrase_key TEXT NOT NULL,
+  entry_day TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS daily_pnl (
   day TEXT PRIMARY KEY,
@@ -81,6 +95,12 @@ class Store:
             "end_date": "ALTER TABLE positions ADD COLUMN end_date TEXT",
             "tick_size": "ALTER TABLE positions ADD COLUMN tick_size TEXT NOT NULL DEFAULT '0.01'",
             "neg_risk": "ALTER TABLE positions ADD COLUMN neg_risk INTEGER NOT NULL DEFAULT 0",
+            "subject_key": "ALTER TABLE positions ADD COLUMN subject_key TEXT NOT NULL DEFAULT ''",
+            "phrase_key": "ALTER TABLE positions ADD COLUMN phrase_key TEXT NOT NULL DEFAULT ''",
+            "closed_at": "ALTER TABLE positions ADD COLUMN closed_at TEXT",
+            "exit_price": "ALTER TABLE positions ADD COLUMN exit_price REAL",
+            "realized_pnl": "ALTER TABLE positions ADD COLUMN realized_pnl REAL",
+            "redemption_status": "ALTER TABLE positions ADD COLUMN redemption_status TEXT NOT NULL DEFAULT ''",
         }
         for column, statement in migrations.items():
             if column not in columns:
@@ -92,6 +112,10 @@ class Store:
         self.db.execute(
             "CREATE INDEX IF NOT EXISTS positions_condition_status_idx "
             "ON positions(condition_id, status)"
+        )
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS entry_locks_word_day_idx "
+            "ON entry_locks(subject_key, phrase_key, entry_day)"
         )
         self.db.commit()
         observation_columns = {row[1] for row in self.db.execute("PRAGMA table_info(observations)")}
@@ -132,6 +156,12 @@ class Store:
               end_date TEXT,
               tick_size TEXT NOT NULL DEFAULT '0.01',
               neg_risk INTEGER NOT NULL DEFAULT 0
+              ,subject_key TEXT NOT NULL DEFAULT ''
+              ,phrase_key TEXT NOT NULL DEFAULT ''
+              ,closed_at TEXT
+              ,exit_price REAL
+              ,realized_pnl REAL
+              ,redemption_status TEXT NOT NULL DEFAULT ''
             )"""
         )
         self.db.execute(
@@ -160,15 +190,38 @@ class Store:
                            allow_broad_fallback: bool = True) -> tuple[int, int, str]:
         transcript = self.transcript_pattern(
             subject, phrase, context, period, min_mentions,
-            allow_phrase_fallback=allow_broad_fallback)
+            allow_phrase_fallback=False)
         if transcript[1]:
             return transcript
         exact_hits, exact_total = self.historical(subject, phrase, context)
         if exact_total:
             return exact_hits, exact_total, "exact phrase/context"
+
+        # Context inference is intentionally conservative and the upstream
+        # market often labels a rally, briefing, or earnings call only as
+        # "other". Reuse only the same subject and exact phrase across
+        # contexts. This is materially safer than falling back to unrelated
+        # phrases for the same speaker or to global market history.
+        useful_subject = subject.lower() not in {"anyone", "unknown"}
+        if useful_subject and not context.lower().startswith("tv:"):
+            transcript_phrase = self.transcript_pattern(
+                subject, phrase, context, period, min_mentions,
+                allow_phrase_fallback=True)
+            if transcript_phrase[1]:
+                hits, total, scope = transcript_phrase
+                return hits, total, f"{scope} (cross-context)"
+
+            phrase_row = self.db.execute(
+                """SELECT COUNT(*) n, COALESCE(SUM(occurred),0) hits
+                   FROM observations WHERE lower(subject)=lower(?)
+                   AND lower(phrase)=lower(?)""",
+                (subject, phrase),
+            ).fetchone()
+            if int(phrase_row["n"]):
+                return (int(phrase_row["hits"]), int(phrase_row["n"]),
+                        "exact subject/phrase (cross-context)")
         if not allow_broad_fallback:
             return 0, 0, "neutral — no phrase-level evidence"
-        useful_subject = subject.lower() not in {"anyone", "unknown"}
         queries = []
         if useful_subject:
             queries.extend([
@@ -302,6 +355,10 @@ class Store:
     def open_positions(self) -> list[sqlite3.Row]:
         return list(self.db.execute("SELECT * FROM positions WHERE status='open'"))
 
+    def redeemable_positions(self) -> list[sqlite3.Row]:
+        return list(self.db.execute(
+            "SELECT * FROM positions WHERE redemption_status='redeemable'"))
+
     def has_condition(self, condition_id: str) -> bool:
         return self.db.execute(
             "SELECT 1 FROM positions WHERE condition_id=? AND status='open'", (condition_id,)
@@ -313,18 +370,59 @@ class Store:
             (condition_id,),
         ).fetchone()[0])
 
+    @staticmethod
+    def entry_key(value: str) -> str:
+        parts = [re.sub(r"[^a-z0-9]+", " ", part.lower()).strip()
+                 for part in str(value).split("|")]
+        return " | ".join(sorted(part for part in set(parts) if part))
+
+    def entry_allowed(self, condition_id: str, subject: str,
+                      phrase: str, day: str | None = None) -> tuple[bool, str]:
+        """Enforce one lifetime condition entry and one word entry per UTC day."""
+        if self.db.execute(
+            "SELECT 1 FROM positions WHERE condition_id=? LIMIT 1", (condition_id,)
+        ).fetchone() or self.db.execute(
+            "SELECT 1 FROM entry_locks WHERE condition_id=?", (condition_id,)
+        ).fetchone():
+            return False, "condition already entered"
+        subject_key = self.entry_key(subject)
+        phrase_key = self.entry_key(phrase)
+        entry_day = day or datetime.now(timezone.utc).date().isoformat()
+        if self.db.execute(
+            """SELECT 1 FROM entry_locks
+               WHERE subject_key=? AND phrase_key=? AND entry_day=? LIMIT 1""",
+            (subject_key, phrase_key, entry_day),
+        ).fetchone():
+            return False, "word mention already entered today"
+        return True, "ok"
+
     def record_position(self, condition_id: str, token_id: str, side: str,
                         size: float, price: float, order_id: str | None,
                         question: str, end_date: str, tick_size: str,
-                        neg_risk: bool) -> int:
+                        neg_risk: bool, subject: str = "",
+                        phrase: str = "") -> int:
         now = datetime.now(timezone.utc).isoformat()
+        entry_day = datetime.now(timezone.utc).date().isoformat()
+        subject_key = self.entry_key(subject)
+        phrase_key = self.entry_key(phrase)
+        allowed, reason = self.entry_allowed(
+            condition_id, subject, phrase, entry_day)
+        if not allowed:
+            raise RuntimeError(f"entry lock rejected confirmed position: {reason}")
+        self.db.execute(
+            """INSERT INTO entry_locks
+               (condition_id,subject_key,phrase_key,entry_day,created_at)
+               VALUES(?,?,?,?,?)""",
+            (condition_id, subject_key, phrase_key, entry_day, now),
+        )
         cursor = self.db.execute(
             """INSERT INTO positions
                (condition_id,token_id,side,size_usd,entry_price,status,opened_at,
-                order_id,peak_price,question,end_date,tick_size,neg_risk)
-               VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?)""",
+                order_id,peak_price,question,end_date,tick_size,neg_risk,
+                subject_key,phrase_key)
+               VALUES(?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?)""",
             (condition_id, token_id, side, size, price, now, order_id, price,
-             question, end_date, tick_size, int(neg_risk)),
+             question, end_date, tick_size, int(neg_risk), subject_key, phrase_key),
         )
         self.db.commit()
         Path(self.journal).parent.mkdir(parents=True, exist_ok=True)
@@ -335,6 +433,43 @@ class Store:
                                  "token_id": token_id, "side": side, "size_usd": size,
                                  "price": price, "order_id": order_id}) + "\n")
         return int(cursor.lastrowid)
+
+    def settle_position(self, position_id: int, payout_price: float,
+                        redemption_status: str, reference: str = "") -> float:
+        """Close local exposure at its resolved payout without placing a sell."""
+        row = self.db.execute(
+            "SELECT * FROM positions WHERE position_id=? AND status='open'",
+            (position_id,),
+        ).fetchone()
+        if not row:
+            return 0.0
+        entry = float(row["entry_price"])
+        shares = float(row["size_usd"]) / entry
+        payout = max(0.0, min(1.0, float(payout_price)))
+        pnl = shares * payout - float(row["size_usd"])
+        now = datetime.now(timezone.utc).isoformat()
+        self.db.execute(
+            """UPDATE positions SET status='resolved', closed_at=?, exit_price=?,
+                      realized_pnl=?, redemption_status=?
+               WHERE position_id=?""",
+            (now, payout, pnl, redemption_status, position_id),
+        )
+        day = datetime.now(timezone.utc).date().isoformat()
+        self.db.execute(
+            """INSERT INTO daily_pnl(day,realized_usd) VALUES(?,?)
+               ON CONFLICT(day) DO UPDATE SET realized_usd=realized_usd+excluded.realized_usd""",
+            (day, pnl),
+        )
+        self.db.commit()
+        Path(self.journal).parent.mkdir(parents=True, exist_ok=True)
+        with open(self.journal, "a") as fh:
+            fh.write(json.dumps({"event": "RESOLVED", "time": now,
+                                 "position_id": position_id,
+                                 "condition_id": row["condition_id"],
+                                 "payout_price": payout, "pnl_usd": pnl,
+                                 "redemption_status": redemption_status,
+                                 "reference": reference}) + "\n")
+        return pnl
 
     def daily_loss(self) -> float:
         return min(0.0, self.daily_pnl())

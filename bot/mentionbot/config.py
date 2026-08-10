@@ -28,11 +28,11 @@ def _validate(cfg: dict) -> None:
     for tier in tiers:
         if tier["min_confidence"] >= tier["max_confidence"]:
             raise ValueError(f"invalid tier {tier['name']}")
-    if (cfg.get("arbitrage") or {}).get("execution_enabled"):
-        raise ValueError(
-            "live paired arbitrage is safety-locked: Polymarket does not document "
-            "batch FOK orders as atomic across both outcome legs"
-        )
+    risk = cfg.get("risk") or {}
+    if int(risk.get("max_positions_per_condition", 1)) != 1:
+        raise ValueError("max_positions_per_condition must remain 1")
+    if float(risk.get("max_hours_before_event", 0)) > 8:
+        raise ValueError("max_hours_before_event cannot exceed 8")
     if cfg["mode"] == "live" and cfg.get("allow_live_trading"):
         required = ["POLYMARKET_PRIVATE_KEY", "POLYMARKET_FUNDER_ADDRESS"]
         missing = [name for name in required if not os.getenv(name)]

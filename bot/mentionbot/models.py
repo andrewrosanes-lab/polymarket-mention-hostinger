@@ -46,11 +46,11 @@ class Score:
     size_usd: float
     historical: float
     orderbook: float
-    news: float
     momentum: float
     pricing_edge: float
     model_edge_pct: float
-    cross_book_arb_pct: float
     explanation: str
     timing_score: float = 50.0
-    arb_confidence: float = 0.0
+    book_confirmation: float = 50.0
+    book_adjustment: float = 0.0
+    book_samples: int = 0
