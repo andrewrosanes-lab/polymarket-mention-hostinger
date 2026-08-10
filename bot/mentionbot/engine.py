@@ -4,13 +4,12 @@ import json
 import logging
 import os
 import time
-from dataclasses import asdict
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .execution import build
 from .market import PolymarketData
-from .news import NewsEvidence, NewsScorer
 from .scoring import combine, historical_score
 from .storage import Store
 from .transcript_history import GovInfoHistory, market_history_shape
@@ -22,7 +21,7 @@ log = logging.getLogger(__name__)
 class Engine:
     def __init__(self, cfg: dict):
         self.cfg = cfg
-        self.data, self.news = PolymarketData(cfg), NewsScorer(cfg)
+        self.data = PolymarketData(cfg)
         self.store = Store(cfg["paths"]["database"], cfg["paths"]["journal"])
         self.executor = build(cfg)
         self.transcript_history = GovInfoHistory(cfg)
@@ -31,6 +30,7 @@ class Engine:
         self._control_path = Path(os.getenv(
             "MENTION_BOT_CONTROL_FILE", "state/control.json"))
         self._runtime_control = self._control_defaults()
+        self._book_history: dict[str, deque[float]] = {}
 
     def _control_defaults(self) -> dict:
         risk = self.cfg["risk"]
@@ -40,7 +40,6 @@ class Engine:
             "minModelEdgePct": float(risk["min_model_edge_pct"]),
             "minTimingScore": float(risk["min_timing_score"]),
             "maxHoursBeforeEvent": float(risk["max_hours_before_event"]),
-            "newsEnabled": bool(self.cfg["news"]["enabled"]),
         }
 
     def _load_runtime_control(self) -> dict:
@@ -54,7 +53,7 @@ class Engine:
                 "minimumConfidence": (65, 90),
                 "minModelEdgePct": (6, 20),
                 "minTimingScore": (45, 90),
-                "maxHoursBeforeEvent": (1, 4),
+                "maxHoursBeforeEvent": (1, 8),
             }
             for key, (lower, upper) in limits.items():
                 value = float(control[key])
@@ -62,7 +61,6 @@ class Engine:
                     raise ValueError(f"{key} outside safe range")
                 control[key] = value
             control["paused"] = bool(control["paused"])
-            control["newsEnabled"] = bool(control["newsEnabled"])
             return control
         except Exception:
             # A malformed or partially-written control file must never loosen
@@ -117,37 +115,19 @@ class Engine:
                 return False, f"more than {max_hours:g} hours before event"
         if not r["min_entry_price"] <= book.best_ask <= r["max_entry_price"]:
             return False, "executable entry price gate"
-        if self.store.open_position_count(market.condition_id) >= r["max_positions_per_condition"]:
-            return False, "per-contract exposure limit"
+        entry_allowed, reason = self.store.entry_allowed(
+            market.condition_id, market.subject, market.phrase)
+        if not entry_allowed:
+            return False, reason
         return True, "ok"
 
-    def arbitrage_status(self, market, yes_book, no_book,
-                         edge_pct: float) -> tuple[bool, str]:
-        """Qualify complement-price arbitrage without submitting unsafe legs."""
-        cfg = self.cfg.get("arbitrage") or {}
-        r = self.cfg["risk"]
-        if not cfg.get("enabled", True): return False, "arb disabled"
-        if edge_pct < float(cfg.get("min_edge_pct", r["min_cross_book_arb_pct"])):
-            return False, "arb edge below 6%"
-        if os.path.exists(r["kill_switch_file"]): return False, "kill switch"
-        if len(self.store.open_positions()) + 2 > r["max_open_positions"]:
-            return False, "two position slots required"
-        if self.store.open_position_count(market.condition_id):
-            return False, "existing contract exposure"
-        if market.liquidity < r["min_liquidity_usd"]: return False, "low liquidity"
-        if market.volume < r["min_volume_usd"]: return False, "low traded volume"
-        if max(yes_book.spread_pct, no_book.spread_pct) > r["max_spread_pct"]:
-            return False, "wide spread"
-        if not all(r["min_entry_price"] <= price <= r["max_entry_price"]
-                   for price in (yes_book.best_ask, no_book.best_ask)):
-            return False, "arb leg price gate"
-        if market.event_start is not None:
-            hours = (market.event_start - datetime.now(timezone.utc)).total_seconds()/3600
-            if hours > float(r["max_hours_before_event"]):
-                return False, "outside four-hour window"
-        if not cfg.get("execution_enabled", False):
-            return True, "qualified arb watch — paired execution safety lock"
-        return True, "qualified"
+    def _remember_book(self, token_id: str, score: float) -> tuple[float, int]:
+        sample_count = int((self.cfg.get("book_confidence") or {}).get(
+            "sample_window", 5))
+        history = self._book_history.setdefault(
+            token_id, deque(maxlen=max(3, sample_count)))
+        history.append(float(score))
+        return sum(history) / len(history), len(history)
 
     def tick(self) -> None:
         self._runtime_control = self._load_runtime_control()
@@ -168,13 +148,15 @@ class Engine:
                          downloads, rows, mentions)
         except Exception:
             log.exception("OpenSubtitles historical refresh failed; retaining existing history")
-        self.manage_positions({market.condition_id: market for market in markets})
+        self.reconcile_positions()
         log.info("discovered %d mention markets", len(markets))
         signals = []
         for market in markets:
             try:
                 book = self.data.book(market.yes_token)
                 no_book = self.data.book(market.no_token)
+                yes_confirmation = self._remember_book(market.yes_token, book.score)
+                no_confirmation = self._remember_book(market.no_token, no_book.score)
                 history_period, min_mentions = market_history_shape(market.question)
                 history_context = (
                     f"tv:{market.episode_target.series.lower()}"
@@ -185,15 +167,24 @@ class Engine:
                     history_period, min_mentions,
                     allow_broad_fallback=False)
                 hist = historical_score(hits, total)
-                news_evidence = (self.news.score(market) if control["newsEnabled"]
-                                 else NewsEvidence(50.0, 0, "disabled by dashboard"))
+                if "cross-context" in history_scope:
+                    # Context-mismatched evidence is useful, but less
+                    # predictive. Pull it halfway back toward neutral before
+                    # it enters the probability model.
+                    hist = 50.0 + (hist - 50.0) * 0.5
                 momentum = self.data.momentum(market.yes_token, market.yes_price)
                 midpoint = ((book.best_bid + book.best_ask) / 2
                             if book.best_ask >= book.best_bid else market.yes_price)
                 market_prior = max(0, min(100, midpoint * 100))
-                score = combine(market, book, no_book, hist, news_evidence.score,
-                                market_prior, momentum,
-                                self.cfg, news_evidence.count, history_scope, total)
+                provisional = combine(
+                    market, book, no_book, hist, market_prior, momentum,
+                    self.cfg, history_scope, total)
+                confirmation, sample_count = (
+                    yes_confirmation if provisional.side == "YES" else no_confirmation)
+                score = combine(
+                    market, book, no_book, hist, market_prior, momentum,
+                    self.cfg, history_scope, total,
+                    confirmation, sample_count)
                 log.info("%s | %s %.1f | %s", market.question, score.side, score.confidence, score.explanation)
                 trade_book = book if score.side == "YES" else no_book
                 minimum_confidence = float(control["minimumConfidence"])
@@ -203,8 +194,6 @@ class Engine:
                     ok, reason = False, f"confidence below {minimum_confidence:g}%"
                 else:
                     ok, reason = self.risk_ok(market, score, trade_book, control)
-                arb_ready, arb_reason = self.arbitrage_status(
-                    market, book, no_book, score.cross_book_arb_pct)
                 signals.append({
                     "question": market.question,
                     "side": score.side,
@@ -213,10 +202,6 @@ class Engine:
                     "historyScore": round(hist, 1),
                     "historyScope": history_scope,
                     "historySamples": total,
-                    "newsScore": round(news_evidence.score, 1),
-                    "newsCount": news_evidence.count,
-                    "newsEntity": news_evidence.entity,
-                    "newsSources": [asdict(source) for source in news_evidence.sources],
                     "modelEdge": round(score.model_edge_pct, 1),
                     "marketPrior": round(market_prior, 1),
                     "timingScore": round(score.timing_score, 1),
@@ -224,24 +209,28 @@ class Engine:
                     "volume": round(market.volume, 2),
                     "bookSpread": round(trade_book.spread_pct, 2),
                     "entryAsk": round(trade_book.best_ask, 4),
-                    "crossBookArb": round(score.cross_book_arb_pct, 1),
-                    "arbConfidence": round(score.arb_confidence, 1),
-                    "arbQualified": arb_ready,
-                    "arbExecutable": bool(
-                        arb_ready and (self.cfg.get("arbitrage") or {}).get("execution_enabled")),
-                    "arbGate": arb_reason,
-                    "route": "DIRECTIONAL" if ok else ("ARB WATCH" if arb_ready else "NONE"),
+                    "bookConfirmation": round(score.book_confirmation, 1),
+                    "bookAdjustment": round(score.book_adjustment, 1),
+                    "bookSamples": score.book_samples,
+                    "strength": ("STRONG NO" if score.side == "NO" and
+                                 score.confidence >= 70 else
+                                 "STRONG YES" if score.side == "YES" and
+                                 score.confidence >= 70 else "WATCH"),
+                    "route": "DIRECTIONAL" if ok else "NONE",
                     "qualified": ok,
                     "gate": reason,
                 })
                 if not ok:
                     log.info("SKIP %s: %s", market.question, reason); continue
-                fill = self.executor.buy(market, score.side, score.size_usd, trade_book)
+                fill = self.executor.buy(
+                    market, score.side, score.size_usd, trade_book,
+                    score.confidence / 100, float(control["minModelEdgePct"]))
                 token = market.yes_token if score.side == "YES" else market.no_token
                 self.store.record_position(market.condition_id, token, score.side,
                                            fill.size_usd, fill.price, fill.order_id,
                                            market.question, market.end_date.isoformat(),
-                                           market.tick_size, market.neg_risk)
+                                           market.tick_size, market.neg_risk,
+                                           market.subject, market.phrase)
                 log.warning("%s BUY %s tier=%s $%.2f @ %.3f order=%s",
                             self.cfg["mode"].upper(), score.side, score.tier,
                             fill.size_usd, fill.price, fill.order_id)
@@ -254,6 +243,15 @@ class Engine:
             positions = self.store.open_positions()
             path = Path(self.cfg["paths"]["status"])
             path.parent.mkdir(parents=True, exist_ok=True)
+            evidence = self.store.evidence_summary()
+            covered = sum(int(float(item.get("historySamples") or 0) > 0)
+                          for item in signals)
+            evidence["liveHistoryCoverage"] = {
+                "covered": covered,
+                "total": len(signals),
+                "percent": round(covered / len(signals) * 100, 1)
+                if signals else 0.0,
+            }
             payload = {
                 "connected": True,
                 "mode": self.cfg["mode"].upper(),
@@ -263,14 +261,13 @@ class Engine:
                 "dailyPnl": round(self.store.daily_pnl(), 2),
                 "lastCycle": datetime.now(timezone.utc).isoformat(),
                 "signals": sorted(signals, key=lambda item: item["confidence"], reverse=True)[:25],
-                "evidence": self.store.evidence_summary(),
+                "evidence": evidence,
                 "strategy": {
                     "directional": True,
-                    "arbDetection": bool((self.cfg.get("arbitrage") or {}).get("enabled", True)),
-                    "arbExecution": bool((self.cfg.get("arbitrage") or {}).get("execution_enabled", False)),
-                    "maxPositionsPerContract": (self.cfg.get("risk") or {}).get(
-                        "max_positions_per_condition", 2),
+                    "holdUntilResolution": True,
+                    "maxPositionsPerContract": 1,
                 },
+                "redeemable": len(self.store.redeemable_positions()),
                 "control": getattr(self, "_runtime_control", self._control_defaults()),
             }
             temporary = path.with_suffix(path.suffix + ".tmp")
@@ -279,49 +276,54 @@ class Engine:
         except Exception:
             log.exception("failed to write dashboard status")
 
-    def manage_positions(self, markets: dict) -> None:
-        r = self.cfg["risk"]
-        for position in self.store.open_positions():
-            market = markets.get(position["condition_id"])
+    def reconcile_positions(self) -> None:
+        """Hold every trade to resolution and reconcile it from Polymarket."""
+        positions = self.store.open_positions()
+        if not positions:
+            return
+        address = os.environ.get("POLYMARKET_FUNDER_ADDRESS", "")
+        if not address:
+            log.error("cannot reconcile positions: missing funder address")
+            return
+        try:
+            current = self.data.portfolio_positions(address, closed=False)
+            closed = self.data.portfolio_positions(address, closed=True)
+        except Exception:
+            log.exception("position reconciliation API failed; no local state changed")
+            return
+        active_by_token = {str(item.get("asset") or item.get("tokenId") or ""): item
+                           for item in current}
+        closed_by_token = {str(item.get("asset") or item.get("tokenId") or ""): item
+                           for item in closed}
+        for position in positions:
+            token_id = str(position["token_id"])
+            active = active_by_token.get(token_id)
+            finished = closed_by_token.get(token_id)
             try:
-                book = self.data.book(position["token_id"])
-                current = book.best_bid
-                if current <= 0:
-                    continue
-                entry = float(position["entry_price"])
-                peak = self.store.update_peak(position["position_id"], current)
-                gain = (current / entry - 1) * 100
-                end_date = market.end_date if market else None
-                if end_date is None and position["end_date"]:
-                    end_date = datetime.fromisoformat(str(position["end_date"]).replace("Z", "+00:00"))
-                minutes = ((end_date - datetime.now(timezone.utc)).total_seconds() / 60
-                           if end_date else float("inf"))
-                reason = None
-                low_band = r["low_price_band_min"] <= entry <= r["low_price_band_max"]
-                low_stop = entry * (1 - r["low_price_stop_loss_pct"] / 100)
-                trailing_stop = peak * (1 - r["low_price_trailing_stop_pct"] / 100)
-                if gain >= r["take_profit_pct"]:
-                    reason = "take-profit"
-                elif low_band and current <= max(low_stop, trailing_stop):
-                    reason = "50% low-price stop/trailing stop"
-                elif not low_band and gain <= -r["stop_loss_pct"]:
-                    reason = "stop-loss"
-                elif minutes <= r["exit_minutes_before_end"]:
-                    reason = "pre-resolution exit"
-                if not reason:
-                    continue
-                shares = float(position["size_usd"]) / entry
-                tick_size = market.tick_size if market else str(position["tick_size"] or "0.01")
-                neg_risk = market.neg_risk if market else bool(position["neg_risk"])
-                fill = self.executor.sell(position["token_id"], shares, current,
-                                          tick_size, neg_risk)
-                pnl = self.store.close_position(position["position_id"], fill.price,
-                                                fill.order_id, fill.shares)
-                log.warning("CLOSE %s reason=%s pnl=$%.2f order=%s",
-                            market.question if market else position["question"],
-                            reason, pnl, fill.order_id)
+                redeemable = str((active or {}).get("redeemable", "")).lower() in {
+                    "1", "true", "yes"
+                }
+                if active and redeemable:
+                    payout = float(active.get("curPrice") or active.get("currentPrice") or 0)
+                    pnl = self.store.settle_position(
+                        position["position_id"], payout, "redeemable",
+                        str(active.get("slug") or ""))
+                    log.warning("RESOLVED %s payout=%.2f pnl=$%.2f; redemption required",
+                                position["question"], payout, pnl)
+                elif finished:
+                    entry = float(position["entry_price"])
+                    shares = float(position["size_usd"]) / entry
+                    realized = float(finished.get("realizedPnl") or
+                                     finished.get("cashPnl") or 0)
+                    payout = (realized + float(position["size_usd"])) / shares
+                    pnl = self.store.settle_position(
+                        position["position_id"], payout, "closed-on-polymarket",
+                        str(finished.get("slug") or ""))
+                    log.warning("RECONCILED %s payout=%.2f pnl=$%.2f",
+                                position["question"], payout, pnl)
             except Exception:
-                log.exception("position management failed: %s", position["condition_id"])
+                log.exception("position reconciliation failed: %s",
+                              position["condition_id"])
 
     def run(self) -> None:
         while True:

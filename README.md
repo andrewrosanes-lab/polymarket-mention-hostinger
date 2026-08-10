@@ -23,37 +23,31 @@ VPS environment. Missing credentials do not prevent the live bot from running.
 
 The bot writes an atomic, read-only operational snapshot to
 `state/status.json`. Docker mounts the state volume read-only in the dashboard,
-which reports the latest cycle, open exposure, grounded news sources, and the
+which reports the latest cycle, open exposure, book confirmation, and the
 exact historical scope and sample size used for each evaluated contract. A
 snapshot older than ten minutes is shown as disconnected.
 
-News evidence is deliberately fail-neutral: an article must contain both the
-market's event entity (person, TV series, or NFL matchup) and the target phrase.
-Duplicate headlines are counted once. TV subtitle statistics are isolated by
-series, and TV/NFL markets without phrase-level evidence receive a neutral 50
-instead of a generic cross-market fallback.
+TV subtitle statistics are isolated by series, and markets without phrase-level
+evidence receive a neutral history input instead of a generic cross-market
+fallback. News and arbitrage are excluded from scoring and the dashboard.
 
-The strategy separates its jobs: history, grounded news, and the current
-market prior estimate mention probability; order-book pressure and momentum
-confirm entry timing; the executable ask must still leave at least six
-percentage points of directional model edge. No more than two open entries may
-concentrate in one contract.
+Historical context and the current market prior estimate mention probability.
+Persistent order-book pressure requires three samples and may adjust confidence
+by no more than five points. Liquidity and volume remain $200 hard execution
+gates but never add confidence. The executable ask must still leave at least
+six percentage points of model edge.
 
-Unavailable history/news evidence is excluded and the remaining probability
-inputs are renormalized. Complement-price arbitrage (`1 - YES ask - NO ask`)
-is detected independently and receives its own execution-confidence metric
-at a six-percent threshold. Its live execution is safety-locked because the
-CLOB does not document a batch of two FOK outcome orders as atomic across both
-legs, and this project does not yet contain automatic paired settlement. The
-dashboard labels these as `ARB WATCH`, never as completed arbitrage trades.
+Each condition can be entered only once for its lifetime. A normalized
+subject/phrase can be entered only once per UTC day. Positions are held through
+resolution; resolved positions are reconciled against Polymarket's portfolio
+data and flagged when onchain redemption is required.
 
 ## Authenticated dashboard controls
 
 The dashboard can tune a strict whitelist without exposing wallet credentials:
 minimum confidence (65–90), minimum model edge (6–20%), timing confirmation
-(45–90), known-event entry window (1–4 hours), grounded-news participation,
-and pause/resume for new entries. Existing position monitoring and protective
-exits continue while entries are paused. Changes are validated twice: once by
+(45–90), known-event entry window (1–8 hours), and pause/resume for new entries.
+Resolution reconciliation continues while entries are paused. Changes are validated twice: once by
 the dashboard API and again by the bot. Invalid control files fail closed by
 pausing new entries.
 

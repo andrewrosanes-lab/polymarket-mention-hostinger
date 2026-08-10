@@ -9,17 +9,24 @@ minimum_confidence: 65
 
 probability_weights:
   historical_context: 0.35
-  news_live_impact: 0.25
   market_prior: 0.14
 
 timing_weights:
   order_book_imbalance: 0.20
   momentum: 0.14
 
+# Book pressure confirms a model signal; it never selects the direction. Three
+# consecutive samples are required and confidence can move at most five points.
+book_confidence:
+  required_samples: 3
+  sample_window: 5
+  adjustment_scale: 0.10
+  max_adjustment_points: 5
+
 historical:
   enabled: true
   refresh_hours: 6
-  max_events_per_tag: 75
+  max_events_per_tag: 500
   resolution_confidence: 0.99
 
 # Official U.S. Government transcripts. GovInfo explicitly publishes sitemaps
@@ -55,32 +62,16 @@ risk:
   max_open_positions: 5
   max_entry_price: 0.93
   min_entry_price: 0.16
-  min_liquidity_usd: 800
-  min_volume_usd: 800
+  # Capacity remains a hard execution-safety gate, not a confidence input.
+  min_liquidity_usd: 200
+  min_volume_usd: 200
   max_spread_pct: 12
   min_model_edge_pct: 6
-  min_cross_book_arb_pct: 6
   min_timing_score: 45
-  max_hours_before_event: 4
-  require_known_event_start: false
-  max_positions_per_condition: 2
-  take_profit_pct: 30
-  stop_loss_pct: 25
-  low_price_stop_loss_pct: 50
-  low_price_trailing_stop_pct: 50
-  low_price_band_min: 0.16
-  low_price_band_max: 0.37
-  exit_minutes_before_end: 15
+  max_hours_before_event: 8
+  require_known_event_start: true
+  max_positions_per_condition: 1
   kill_switch_file: state/HALT
-
-arbitrage:
-  enabled: true
-  min_edge_pct: 6
-  bundle_size_usd: 5
-  # Two FOK orders in one batch are not documented as atomic across both legs.
-  # Detection is live; execution remains locked until paired settlement and
-  # one-leg rollback are independently verified against the production SDK.
-  execution_enabled: false
 
 discovery:
   # Verified against Gamma's live /tags endpoint on 2026-08-08. Tag discovery
@@ -98,11 +89,7 @@ discovery:
   mention_markers: [say, mention, mentions, mentioned, utter, word, phrase]
 
 news:
-  enabled: true
-  lookback_hours: 24
-  max_items: 30
-  # Google News RSS is used read-only; no key is required.
-  rss_url: "https://news.google.com/rss/search"
+  enabled: false
 
 execution:
   maker_first: true
@@ -119,8 +106,8 @@ execution:
   host: "https://clob.polymarket.com"
 
 # Gamma does not always publish the actual speech/kickoff time. Add ISO-8601
-# Optional UTC overrides by event slug. Markets without a known event start are
-# still eligible; known starts must be no more than four hours away.
+# Optional UTC overrides by event slug. Entries require a known start and must
+# be no more than eight hours away.
 scheduled_events: {}
 # Example:
 # scheduled_events:

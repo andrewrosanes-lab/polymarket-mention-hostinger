@@ -34,7 +34,9 @@ def _response_fill(result: dict, side: str, fallback_price: float) -> Fill:
 class PaperExecutor:
     def __init__(self, cfg: dict): self.cfg = cfg
 
-    def buy(self, market: Market, side: str, usd: float, book: BookSignal) -> Fill:
+    def buy(self, market: Market, side: str, usd: float, book: BookSignal,
+            model_probability: float | None = None,
+            minimum_edge_pct: float = 0.0) -> Fill:
         price = maker_price(book, market.tick_size,
                             self.cfg["execution"]["price_buffer_ticks"])
         return Fill("paper-maker", price, usd, usd / price)
@@ -73,7 +75,9 @@ class LiveExecutor:
         self.OrderPayload, self.Options = OrderPayload, PartialCreateOrderOptions
         self.OrderType, self.Side = OrderType, Side
 
-    def buy(self, market: Market, side: str, usd: float, book: BookSignal) -> Fill:
+    def buy(self, market: Market, side: str, usd: float, book: BookSignal,
+            model_probability: float | None = None,
+            minimum_edge_pct: float = 0.0) -> Fill:
         token = market.yes_token if side == "YES" else market.no_token
         price = maker_price(book, market.tick_size,
                             self.cfg["execution"]["price_buffer_ticks"])
@@ -99,9 +103,12 @@ class LiveExecutor:
             if matched >= shares * 0.999:
                 return Fill(order_id, price, matched * price, matched)
 
+        # Cancel first, then re-read the final matched amount. This closes the
+        # race where a maker fill lands between the last poll and cancellation
+        # and a second taker order would otherwise oversize the position.
+        self.client.cancel_order(self.OrderPayload(orderID=order_id))
         order = self.client.get_order(order_id)
         matched = float(order.get("size_matched") or 0)
-        self.client.cancel_order(self.OrderPayload(orderID=order_id))
         if matched > 0:
             # Do not submit a second leg after a partial maker fill; reconcile
             # only the confirmed maker shares to prevent accidental oversizing.
@@ -109,6 +116,10 @@ class LiveExecutor:
 
         slippage_bps = taker_slippage_bps(book, self.cfg["execution"])
         max_price = min(0.99, book.best_ask * (1 + slippage_bps / 10_000))
+        if (model_probability is not None and
+                (float(model_probability) - max_price) * 100 < minimum_edge_pct):
+            raise RuntimeError(
+                "taker fallback cancelled: slippage erased the required model edge")
         taker = self.client.create_and_post_market_order(
             order_args=self.MarketOrderArgs(token_id=token, amount=usd,
                 side=self.Side.BUY, price=max_price, order_type=self.OrderType.FAK),
