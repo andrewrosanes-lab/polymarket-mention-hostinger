@@ -79,6 +79,16 @@ CREATE TABLE IF NOT EXISTS transcript_source_refreshes (
   source_kind TEXT NOT NULL,
   PRIMARY KEY (subject, phrase, source_kind)
 );
+CREATE TABLE IF NOT EXISTS youtube_shadow_predictions (
+  condition_id TEXT PRIMARY KEY,
+  segment TEXT NOT NULL,
+  baseline_probability REAL NOT NULL,
+  option_c_probability REAL NOT NULL,
+  transcript_samples INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  resolved_outcome INTEGER CHECK (resolved_outcome IN (0,1)),
+  resolved_at TEXT
+);
 """
 
 
@@ -261,19 +271,93 @@ class Store:
             row = self.db.execute(
                 f"""SELECT COUNT(*) n,
                     COALESCE(SUM(CASE WHEN mention_count >= ? THEN 1 ELSE 0 END),0) hits
-                    FROM transcript_mentions WHERE {where}""",
+                    FROM transcript_mentions WHERE {where}
+                    AND source_kind NOT LIKE '%_shadow'""",
                 (int(min_mentions), *params),
             ).fetchone()
             scope = base_scope
             if int(row["n"]):
                 kinds = self.db.execute(
                     f"SELECT GROUP_CONCAT(DISTINCT source_kind) kinds "
-                    f"FROM transcript_mentions WHERE {where}", params,
+                    f"FROM transcript_mentions WHERE {where} "
+                    f"AND source_kind NOT LIKE '%_shadow'", params,
                 ).fetchone()[0] or ""
                 if kinds == "opensubtitles":
                     scope = scope.replace("official transcript", "third-party subtitle")
                 return int(row["hits"]), int(row["n"]), scope
         return 0, 0, "neutral"
+
+    def shadow_transcript_pattern(self, subject: str, phrase: str,
+                                  context: str,
+                                  min_mentions: int = 1) -> tuple[int, int, str]:
+        """Return YouTube evidence for display/calibration, never live scoring."""
+        row = self.db.execute(
+            """SELECT COUNT(*) n,
+                      COALESCE(SUM(CASE WHEN mention_count >= ? THEN 1 ELSE 0 END),0) hits
+               FROM transcript_mentions
+               WHERE lower(subject)=lower(?) AND lower(phrase)=lower(?)
+                 AND lower(context)=lower(?) AND source_kind=?""",
+            (int(min_mentions), subject, phrase, context,
+             "supadata_youtube_shadow"),
+        ).fetchone()
+        return (int(row["hits"]), int(row["n"]),
+                "Supadata YouTube shadow evidence")
+
+    def record_youtube_shadow_prediction(
+            self, condition_id: str, segment: str,
+            baseline_probability: float, option_c_probability: float,
+            transcript_samples: int) -> None:
+        self.db.execute(
+            """INSERT OR IGNORE INTO youtube_shadow_predictions
+               (condition_id,segment,baseline_probability,option_c_probability,
+                transcript_samples,created_at)
+               VALUES(?,?,?,?,?,?)""",
+            (condition_id, segment, float(baseline_probability),
+             float(option_c_probability), int(transcript_samples),
+             datetime.now(timezone.utc).isoformat()),
+        )
+        self.db.commit()
+
+    def resolve_youtube_shadow_prediction(self, condition_id: str,
+                                          occurred: bool) -> None:
+        self.db.execute(
+            """UPDATE youtube_shadow_predictions
+               SET resolved_outcome=?, resolved_at=?
+               WHERE condition_id=? AND resolved_outcome IS NULL""",
+            (int(occurred), datetime.now(timezone.utc).isoformat(), condition_id),
+        )
+        self.db.commit()
+
+    def youtube_calibration(self, segment: str, minimum_resolved: int = 30,
+                            minimum_improvement: float = 0.005) -> dict:
+        rows = list(self.db.execute(
+            """SELECT baseline_probability,option_c_probability,resolved_outcome
+               FROM youtube_shadow_predictions
+               WHERE segment=? AND resolved_outcome IS NOT NULL""", (segment,)))
+        count = len(rows)
+        baseline_brier = option_c_brier = None
+        if rows:
+            baseline_brier = sum(
+                (float(row["baseline_probability"]) / 100 - int(row["resolved_outcome"])) ** 2
+                for row in rows) / count
+            option_c_brier = sum(
+                (float(row["option_c_probability"]) / 100 - int(row["resolved_outcome"])) ** 2
+                for row in rows) / count
+        passed = bool(
+            count >= int(minimum_resolved)
+            and option_c_brier is not None
+            and baseline_brier is not None
+            and option_c_brier + float(minimum_improvement) < baseline_brier
+        )
+        return {
+            "segment": segment,
+            "resolved": count,
+            "minimumResolved": int(minimum_resolved),
+            "baselineBrier": baseline_brier,
+            "optionCBrier": option_c_brier,
+            "minimumImprovement": float(minimum_improvement),
+            "passed": passed,
+        }
 
     def add_transcript_mention(self, document_id: str, subject: str, phrase: str,
                                context: str, mention_count: int,

@@ -48,6 +48,17 @@ in the VPS `.env`; the key is optional and the bot retains Gamma history when
 it is absent or the service is unavailable. Subtitle counts are historical
 evidence only and are never represented as the official resolution source.
 
+Published YouTube transcripts can be discovered through Supadata by setting
+`SUPADATA_API_KEY` in the VPS `.env`. The adapter uses native captions only,
+counts target phrases, stores only counts and source metadata, and discards
+transcript text. It is rate-limited to approximately three credits per day by
+default. Option C is armed with probability weights of 29% existing history,
+10% YouTube history, and 10% market prior. Each exact event/context remains
+**shadow-only with zero live weight** until it has at least five comparable
+transcripts and 30 resolved shadow predictions, and its Brier score improves
+on the existing model by at least 0.005. Missing evidence is omitted and the
+available weights are renormalized rather than silently replaced with 50%.
+
 Questions phrased as “this week” are evaluated by historical calendar week,
 not per transcript. Numeric wording such as “10+ times” is also preserved as a
 count threshold instead of being reduced to a simple mentioned/not-mentioned

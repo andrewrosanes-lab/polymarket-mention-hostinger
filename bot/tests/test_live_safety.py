@@ -15,6 +15,8 @@ from mentionbot.storage import Store
 from mentionbot.transcript_history import (count_phrase, market_history_shape,
                                            parse_govinfo_transcript)
 from mentionbot.subtitle_history import EpisodeTarget, infer_episode_target, subtitle_text
+from mentionbot.youtube_history import (SOURCE_KIND, SupadataYouTubeHistory,
+                                        comparable_event_query)
 
 
 def test_confirmed_buy_and_sell_amounts():
@@ -149,6 +151,82 @@ def test_subtitle_history_does_not_leak_between_series(tmp_path):
         "Anyone", "Power", "tv:house of the dragon", allow_broad_fallback=False)
     assert (hits, total) == (0, 0)
     assert scope == "neutral — no phrase-level evidence"
+
+
+def test_supadata_youtube_evidence_is_excluded_from_live_history(tmp_path):
+    store = Store(str(tmp_path / "history.db"), str(tmp_path / "history.jsonl"))
+    store.add_transcript_mention(
+        "youtube:abc12345", "Anyone", "security", "interview", 4,
+        "2026-08-01", "Podcast episode", "https://youtube.com/watch?v=abc12345",
+        source_kind=SOURCE_KIND)
+    assert store.historical_pattern(
+        "Anyone", "security", "interview", allow_broad_fallback=False)[:2] == (0, 0)
+    assert store.shadow_transcript_pattern(
+        "Anyone", "security", "interview")[:2] == (1, 1)
+
+
+def test_supadata_refresh_counts_and_discards_transcript(tmp_path, monkeypatch):
+    store = Store(str(tmp_path / "history.db"), str(tmp_path / "history.jsonl"))
+    cfg = {"youtube_history": {"enabled": True, "minimum_interval_hours": 24,
+                                "target_refresh_hours": 720,
+                                "max_events_per_refresh": 1,
+                                "max_videos_per_event": 2}}
+    monkeypatch.setenv("SUPADATA_API_KEY", "test-key")
+    history = SupadataYouTubeHistory(cfg)
+    history._search = lambda query: [type("V", (), {
+        "video_id": "abc12345", "title": "All-In Podcast episode",
+        "upload_date": "2026-08-01T00:00:00Z",
+        "url": "https://youtube.com/watch?v=abc12345"})()]
+    history._transcript = lambda video: "Security first. More security."
+    market = Market("c", 'Will anyone say "Security"?',
+        "What will be said on the next All-In Podcast?", "s", "es", None,
+        datetime.now(timezone.utc) + timedelta(hours=2), "y", "n", .5, .5,
+        1000, 1000, False, "0.01", "Anyone", "Security", "interview")
+    assert comparable_event_query(market) == "All-In Podcast"
+    assert history.refresh([market], store) == (1, 1, 2)
+    assert store.shadow_transcript_pattern(
+        "Anyone", "Security", "interview")[:2] == (1, 1)
+
+
+def test_option_c_calibration_is_segment_specific_and_requires_30(tmp_path):
+    store = Store(str(tmp_path / "history.db"), str(tmp_path / "history.jsonl"))
+    for number in range(29):
+        condition = f"all-in-{number}"
+        store.record_youtube_shadow_prediction(
+            condition, "interview:all-in-podcast", 50, 90, 5)
+        store.resolve_youtube_shadow_prediction(condition, True)
+    assert not store.youtube_calibration("interview:all-in-podcast")["passed"]
+    condition = "all-in-29"
+    store.record_youtube_shadow_prediction(
+        condition, "interview:all-in-podcast", 50, 90, 5)
+    store.resolve_youtube_shadow_prediction(condition, True)
+    result = store.youtube_calibration("interview:all-in-podcast")
+    assert result["passed"] and result["optionCBrier"] < result["baselineBrier"]
+    assert not store.youtube_calibration("interview:joe-rogan")["passed"]
+
+
+def test_option_c_uses_29_10_10_only_when_explicitly_active():
+    cfg = {"probability_weights": {"historical_context": .35,
+                                    "market_prior": .14},
+           "timing_weights": {"order_book_imbalance": .20, "momentum": .14},
+           "tiers": [{"name": "C", "min_confidence": 65,
+                      "max_confidence": 80, "size_usd": 3}]}
+    market = Market("c", "q", "e", "s", "es", None,
+        datetime.now(timezone.utc) + timedelta(hours=2), "y", "n", .5, .5,
+        1000, 1000, False, "0.01", "Anyone", "word", "interview")
+    yes_book = BookSignal(50, .39, .40, 2, 100, 100)
+    no_book = BookSignal(50, .59, .60, 2, 100, 100)
+    inactive = combine(market, yes_book, no_book, 80, 60, 50,
+                       cfg, "exact", 12)
+    weights = {"historical_context": .29, "youtube_history": .10,
+               "market_prior": .10}
+    active = combine(
+        market, yes_book, no_book, 80, 60, 50, cfg, "exact", 12,
+        youtube_history=90, youtube_samples=5,
+        probability_weights_override=weights)
+    assert inactive.yes_probability == (80 * .35 + 60 * .14) / .49
+    assert active.yes_probability == (80 * .29 + 90 * .10 + 60 * .10) / .49
+    assert active.yes_probability != inactive.yes_probability
 
 
 def test_exact_subject_phrase_can_fallback_across_non_tv_contexts(tmp_path):

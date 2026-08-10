@@ -10,10 +10,11 @@ from pathlib import Path
 
 from .execution import build
 from .market import PolymarketData
-from .scoring import combine, historical_score
+from .scoring import combine, historical_score, probability_from_evidence
 from .storage import Store
 from .transcript_history import GovInfoHistory, market_history_shape
 from .subtitle_history import OpenSubtitlesHistory
+from .youtube_history import SupadataYouTubeHistory, calibration_segment
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class Engine:
         self.executor = build(cfg)
         self.transcript_history = GovInfoHistory(cfg)
         self.subtitle_history = OpenSubtitlesHistory(cfg)
+        self.youtube_history = SupadataYouTubeHistory(cfg)
         self._last_history_refresh = 0.0
         self._control_path = Path(os.getenv(
             "MENTION_BOT_CONTROL_FILE", "state/control.json"))
@@ -82,6 +84,8 @@ class Engine:
                     item["subject"], item["phrase"], item["context"],
                     item["occurred"], item["condition_id"]
                 )
+                self.store.resolve_youtube_shadow_prediction(
+                    item["condition_id"], item["occurred"])
             self._last_history_refresh = time.monotonic()
             log.info("historical Gamma refresh: learned=%d total=%d",
                      learned, self.store.observation_count())
@@ -148,6 +152,13 @@ class Engine:
                          downloads, rows, mentions)
         except Exception:
             log.exception("OpenSubtitles historical refresh failed; retaining existing history")
+        try:
+            videos, rows, mentions = self.youtube_history.refresh(markets, self.store)
+            if videos:
+                log.info("Supadata YouTube shadow refresh: videos=%d rows=%d mentions=%d",
+                         videos, rows, mentions)
+        except Exception:
+            log.exception("Supadata YouTube shadow refresh failed; retaining existing evidence")
         self.reconcile_positions()
         log.info("discovered %d mention markets", len(markets))
         signals = []
@@ -172,19 +183,61 @@ class Engine:
                     # predictive. Pull it halfway back toward neutral before
                     # it enters the probability model.
                     hist = 50.0 + (hist - 50.0) * 0.5
+                youtube_hits, youtube_total, youtube_scope = (
+                    self.store.shadow_transcript_pattern(
+                        market.subject, market.phrase, market.context,
+                        min_mentions=min_mentions))
+                youtube_shadow = historical_score(youtube_hits, youtube_total)
                 momentum = self.data.momentum(market.yes_token, market.yes_price)
                 midpoint = ((book.best_bid + book.best_ask) / 2
                             if book.best_ask >= book.best_bid else market.yes_price)
                 market_prior = max(0, min(100, midpoint * 100))
+                youtube_cfg = self.cfg.get("youtube_history") or {}
+                option_weights = youtube_cfg.get("option_c_weights") or {
+                    "historical_context": 0.29,
+                    "youtube_history": 0.10,
+                    "market_prior": 0.10,
+                }
+                segment = calibration_segment(market)
+                minimum_transcripts = int(youtube_cfg.get(
+                    "minimum_comparable_transcripts", 5))
+                minimum_resolved = int(youtube_cfg.get(
+                    "minimum_resolved_predictions", 30))
+                minimum_improvement = float(youtube_cfg.get(
+                    "minimum_brier_improvement", 0.005))
+                baseline_probability = probability_from_evidence(
+                    hist, total, market_prior, self.cfg["probability_weights"])
+                option_c_probability = probability_from_evidence(
+                    hist, total, market_prior, option_weights,
+                    youtube_shadow, youtube_total)
+                if youtube_total >= minimum_transcripts:
+                    self.store.record_youtube_shadow_prediction(
+                        market.condition_id, segment, baseline_probability,
+                        option_c_probability, youtube_total)
+                calibration = self.store.youtube_calibration(
+                    segment, minimum_resolved, minimum_improvement)
+                youtube_active = bool(
+                    youtube_cfg.get("option_c_armed", True)
+                    and youtube_total >= minimum_transcripts
+                    and calibration["passed"])
+                active_youtube = youtube_shadow if youtube_active else None
+                active_youtube_samples = youtube_total if youtube_active else 0
+                active_weights = option_weights if youtube_active else None
                 provisional = combine(
                     market, book, no_book, hist, market_prior, momentum,
-                    self.cfg, history_scope, total)
+                    self.cfg, history_scope, total,
+                    youtube_history=active_youtube,
+                    youtube_samples=active_youtube_samples,
+                    probability_weights_override=active_weights)
                 confirmation, sample_count = (
                     yes_confirmation if provisional.side == "YES" else no_confirmation)
                 score = combine(
                     market, book, no_book, hist, market_prior, momentum,
                     self.cfg, history_scope, total,
-                    confirmation, sample_count)
+                    confirmation, sample_count,
+                    youtube_history=active_youtube,
+                    youtube_samples=active_youtube_samples,
+                    probability_weights_override=active_weights)
                 log.info("%s | %s %.1f | %s", market.question, score.side, score.confidence, score.explanation)
                 trade_book = book if score.side == "YES" else no_book
                 minimum_confidence = float(control["minimumConfidence"])
@@ -202,6 +255,14 @@ class Engine:
                     "historyScore": round(hist, 1),
                     "historyScope": history_scope,
                     "historySamples": total,
+                    "youtubeShadowScore": round(youtube_shadow, 1),
+                    "youtubeShadowHits": youtube_hits,
+                    "youtubeShadowSamples": youtube_total,
+                    "youtubeShadowScope": youtube_scope,
+                    "youtubeShadowLiveWeight": 10 if youtube_active else 0,
+                    "youtubeOptionCArmed": bool(youtube_cfg.get("option_c_armed", True)),
+                    "youtubeOptionCActive": youtube_active,
+                    "youtubeCalibration": calibration,
                     "modelEdge": round(score.model_edge_pct, 1),
                     "marketPrior": round(market_prior, 1),
                     "timingScore": round(score.timing_score, 1),

@@ -52,6 +52,31 @@ subtitle_history:
   timeout_sec: 20
   user_agent: "MentionEdge v1.0"
 
+# Published YouTube transcripts discovered through Supadata. Option C is armed,
+# but each exact event/context remains shadow-only until its calibration gate
+# passes. Before that point it has zero influence on probability, confidence,
+# direction, size, or gates.
+# Native transcript mode avoids surprise AI-generation charges. The default
+# budget is at most one search plus two transcripts per day (~90 credits/month).
+youtube_history:
+  enabled: true
+  shadow_only_until_calibrated: true
+  option_c_armed: true
+  minimum_comparable_transcripts: 5
+  minimum_resolved_predictions: 30
+  minimum_brier_improvement: 0.005
+  option_c_weights:
+    historical_context: 0.29
+    youtube_history: 0.10
+    market_prior: 0.10
+  minimum_interval_hours: 24
+  target_refresh_hours: 720
+  max_events_per_refresh: 1
+  max_videos_per_event: 2
+  search_limit: 8
+  upload_date: year
+  timeout_sec: 30
+
 tiers:
   - {name: C, min_confidence: 65, max_confidence: 80, size_usd: 3}
   - {name: B, min_confidence: 80, max_confidence: 90, size_usd: 4}
