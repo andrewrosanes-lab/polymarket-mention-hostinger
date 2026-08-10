@@ -19,11 +19,29 @@ def tier_for(confidence: float, tiers: list[dict]) -> tuple[str | None, float]:
     return None, 0.0
 
 
+def probability_from_evidence(hist: float, history_samples: int,
+                              market_prior: float, weights: dict,
+                              youtube_history: float | None = None,
+                              youtube_samples: int = 0) -> float:
+    """Normalize available probability evidence without treating missing as 50."""
+    evidence = [(market_prior, float(weights["market_prior"]))]
+    if history_samples > 0:
+        evidence.append((hist, float(weights["historical_context"])))
+    youtube_weight = float(weights.get("youtube_history", 0))
+    if youtube_history is not None and youtube_samples > 0 and youtube_weight > 0:
+        evidence.append((youtube_history, youtube_weight))
+    total_weight = sum(weight for _, weight in evidence)
+    probability = sum(value * weight for value, weight in evidence) / total_weight
+    return max(0, min(100, probability))
+
+
 def combine(market: Market, yes_book: BookSignal, no_book: BookSignal,
             hist: float, market_prior: float, momentum: float, cfg: dict,
             history_scope: str = "exact",
             history_samples: int = 0, book_confirmation: float = 50.0,
-            book_samples: int = 0) -> Score:
+            book_samples: int = 0, youtube_history: float | None = None,
+            youtube_samples: int = 0,
+            probability_weights_override: dict | None = None) -> Score:
     """Estimate direction, then apply a small persistent-book confirmation.
 
     News and complement-price arbitrage are deliberately excluded. Order-book
@@ -31,16 +49,10 @@ def combine(market: Market, yes_book: BookSignal, no_book: BookSignal,
     configured cap, and it has no effect until enough consecutive samples
     exist.
     """
-    probability_weights = cfg["probability_weights"]
-    # A neutral 50 means evidence was unavailable, not that an observation
-    # supports a 50/50 outcome. Omit unavailable sources and renormalize the
-    # remaining evidence so missing news/history cannot dilute real evidence.
-    evidence = [(market_prior, probability_weights["market_prior"])]
-    if history_samples > 0:
-        evidence.append((hist, probability_weights["historical_context"]))
-    probability_weight = sum(weight for _, weight in evidence)
-    yes = sum(value * weight for value, weight in evidence) / probability_weight
-    yes = max(0, min(100, yes))
+    probability_weights = probability_weights_override or cfg["probability_weights"]
+    yes = probability_from_evidence(
+        hist, history_samples, market_prior, probability_weights,
+        youtube_history, youtube_samples)
     side = "YES" if yes >= 50 else "NO"
     base_confidence = yes if side == "YES" else 100 - yes
     selected_book = yes_book if side == "YES" else no_book
@@ -67,6 +79,8 @@ def combine(market: Market, yes_book: BookSignal, no_book: BookSignal,
     pricing_edge = max(0, min(100, 50 + model_edge_pct * 2))
     tier, size = tier_for(confidence, cfg["tiers"])
     explanation = (f"historical={hist:.1f} ({history_scope}, n={history_samples}); "
+                   f"youtube={youtube_history if youtube_history is not None else 'inactive'} "
+                   f"(n={youtube_samples}); "
                    f"market_prior={market_prior:.1f}; book_confirmation={book_confirmation:.1f} "
                    f"(n={book_samples}, adjustment={book_adjustment:+.1f}); "
                    f"timing={timing:.1f}; pricing_edge={pricing_edge:.1f}; "

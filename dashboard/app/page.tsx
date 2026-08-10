@@ -24,7 +24,7 @@ type Status = {
 
 const defaultControl:Control = {
   paused:false, minimumConfidence:65, minModelEdgePct:6,
-  minTimingScore:45, maxHoursBeforeEvent:8,
+  minTimingScore:0, maxHoursBeforeEvent:24,
 };
 const tags = [["105481","Trump speech"],["105482","Politics"],["105486","NFL"],["100343","Mentions"]];
 
@@ -161,8 +161,8 @@ export default function Home(){
         <div className="controlGrid">
           <ControlRange label="Minimum confidence" help="Tier C cannot go below 65%." value={control.minimumConfidence} min={65} max={90} step={1} suffix="%" onChange={value=>setControl({...control,minimumConfidence:value})}/>
           <ControlRange label="Minimum model edge" help="The directional price advantage must remain at least 6%." value={control.minModelEdgePct} min={6} max={20} step={0.5} suffix="%" onChange={value=>setControl({...control,minModelEdgePct:value})}/>
-          <ControlRange label="Timing confirmation" help="Higher values demand stronger book and momentum agreement." value={control.minTimingScore} min={45} max={90} step={1} onChange={value=>setControl({...control,minTimingScore:value})}/>
-          <ControlRange label="Entry window" help="How close the verified event start must be." value={control.maxHoursBeforeEvent} min={1} max={8} step={0.5} suffix="h" onChange={value=>setControl({...control,maxHoursBeforeEvent:value})}/>
+          <ControlRange label="Timing confirmation" help="Higher values demand stronger book and momentum agreement." value={control.minTimingScore} min={0} max={90} step={1} onChange={value=>setControl({...control,minTimingScore:value})}/>
+          <ControlRange label="Entry window" help="How close the verified event start must be." value={control.maxHoursBeforeEvent} min={1} max={24} step={0.5} suffix="h" onChange={value=>setControl({...control,maxHoursBeforeEvent:value})}/>
         </div>
         <div className="switchRows"><Toggle checked={control.paused} onChange={paused=>setControl({...control,paused})} title="Pause new entries" text="Resolution reconciliation continues while entries are paused." danger/></div>
         <label className="tokenField"><span>Dashboard admin token</span><input type="password" autoComplete="off" value={adminToken} onChange={e=>setAdminToken(e.target.value)} placeholder="Enter token to authorize this save"/></label>
