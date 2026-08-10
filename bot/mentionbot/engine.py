@@ -52,8 +52,8 @@ class Engine:
             limits = {
                 "minimumConfidence": (65, 90),
                 "minModelEdgePct": (6, 20),
-                "minTimingScore": (45, 90),
-                "maxHoursBeforeEvent": (1, 8),
+                "minTimingScore": (0, 90),
+                "maxHoursBeforeEvent": (1, 24),
             }
             for key, (lower, upper) in limits.items():
                 value = float(control[key])

@@ -63,12 +63,12 @@ risk:
   max_entry_price: 0.93
   min_entry_price: 0.16
   # Capacity remains a hard execution-safety gate, not a confidence input.
-  min_liquidity_usd: 200
-  min_volume_usd: 200
-  max_spread_pct: 12
+  min_liquidity_usd: 0
+  min_volume_usd: 0
+  max_spread_pct: 100
   min_model_edge_pct: 6
-  min_timing_score: 45
-  max_hours_before_event: 8
+  min_timing_score: 0
+  max_hours_before_event: 24
   require_known_event_start: true
   max_positions_per_condition: 1
   kill_switch_file: state/HALT

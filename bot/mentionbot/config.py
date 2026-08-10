@@ -31,8 +31,8 @@ def _validate(cfg: dict) -> None:
     risk = cfg.get("risk") or {}
     if int(risk.get("max_positions_per_condition", 1)) != 1:
         raise ValueError("max_positions_per_condition must remain 1")
-    if float(risk.get("max_hours_before_event", 0)) > 8:
-        raise ValueError("max_hours_before_event cannot exceed 8")
+    if float(risk.get("max_hours_before_event", 0)) > 24:
+        raise ValueError("max_hours_before_event cannot exceed 24")
     if cfg["mode"] == "live" and cfg.get("allow_live_trading"):
         required = ["POLYMARKET_PRIVATE_KEY", "POLYMARKET_FUNDER_ADDRESS"]
         missing = [name for name in required if not os.getenv(name)]

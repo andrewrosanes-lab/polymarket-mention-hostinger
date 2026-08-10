@@ -17,8 +17,8 @@ const defaults: Control = {
   paused: false,
   minimumConfidence: 65,
   minModelEdgePct: 6,
-  minTimingScore: 45,
-  maxHoursBeforeEvent: 8,
+  minTimingScore: 0,
+  maxHoursBeforeEvent: 24,
 };
 
 const headers = { "Cache-Control": "no-store" };
@@ -67,8 +67,8 @@ export async function POST(request: Request) {
       paused: Boolean(body.paused),
       minimumConfidence: bounded(body.minimumConfidence, "Confidence", 65, 90),
       minModelEdgePct: bounded(body.minModelEdgePct, "Model edge", 6, 20),
-      minTimingScore: bounded(body.minTimingScore, "Timing score", 45, 90),
-      maxHoursBeforeEvent: bounded(body.maxHoursBeforeEvent, "Entry window", 1, 8),
+      minTimingScore: bounded(body.minTimingScore, "Timing score", 0, 90),
+      maxHoursBeforeEvent: bounded(body.maxHoursBeforeEvent, "Entry window", 1, 24),
       updatedAt: new Date().toISOString(),
     };
     const path = controlFile();
