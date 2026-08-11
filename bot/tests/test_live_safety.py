@@ -1,10 +1,14 @@
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
+from copy import deepcopy
 import json
+from pathlib import Path
 import sqlite3
 
 import pytest
+import yaml
 
+from mentionbot.config import _validate
 from mentionbot.engine import Engine
 from mentionbot.execution import (DefinitelyNotFilled, LiveExecutor,
                                   _response_fill, capped_taker_price,
@@ -21,6 +25,28 @@ from mentionbot.subtitle_history import EpisodeTarget, infer_episode_target, sub
 from mentionbot.youtube_history import (SOURCE_KIND, SupadataYouTubeHistory,
                                         YouTubeVideo, _published_before_event,
                                         comparable_event_query)
+
+
+def test_production_option_c_limits_are_locked(monkeypatch):
+    config_path = Path(__file__).parents[1] / "config.yaml"
+    cfg = yaml.safe_load(config_path.read_text())
+    monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", "test-key")
+    monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", "0x" + "1" * 40)
+    _validate(cfg)
+    assert cfg["minimum_confidence"] == 70
+    assert cfg["tiers"][0]["min_confidence"] == 70
+    assert cfg["risk"]["min_entry_price"] == .19
+    assert cfg["risk"]["max_entry_price"] == .93
+
+    too_cheap = deepcopy(cfg)
+    too_cheap["risk"]["min_entry_price"] = .18
+    with pytest.raises(ValueError, match="0.19 and 0.93"):
+        _validate(too_cheap)
+
+    too_lenient = deepcopy(cfg)
+    too_lenient["minimum_confidence"] = 69
+    with pytest.raises(ValueError, match="at least 70"):
+        _validate(too_lenient)
 
 
 def test_confirmed_buy_and_sell_amounts():
@@ -87,7 +113,7 @@ def test_option_c_weights_sum_to_confidence_without_changing_direction():
             "historical_mentions": .30, "event_context": .20,
             "market_prior": .15, "microstructure": .25, "momentum": .10,
         },
-        "tiers": [{"name": "C", "min_confidence": 65,
+        "tiers": [{"name": "C", "min_confidence": 70,
                    "max_confidence": 80, "size_usd": 3}],
     }
     market = Market("c", "q", "e", "s", "es", None,
@@ -756,7 +782,7 @@ def test_risk_uses_executable_ask_not_cached_gamma_price():
     engine.cfg = {"risk": {"kill_switch_file": "/never", "max_open_positions": 5,
         "min_liquidity_usd": 800, "min_volume_usd": 800, "max_spread_pct": 12,
         "min_timing_score": 45, "min_model_edge_pct": 6, "require_known_event_start": False,
-        "max_hours_before_event": 8, "min_entry_price": .16, "max_entry_price": .93,
+        "max_hours_before_event": 8, "min_entry_price": .19, "max_entry_price": .93,
         "max_positions_per_condition": 1}}
     engine.store = type("S", (), {"open_positions": lambda self: [],
         "daily_loss": lambda self: -999,
@@ -777,7 +803,7 @@ def test_risk_requires_enough_near_ask_depth_for_the_order():
         "min_liquidity_usd": 0, "min_volume_usd": 0, "max_spread_pct": 100,
         "min_timing_score": 0, "min_model_edge_pct": 6,
         "require_known_event_start": False, "max_hours_before_event": 24,
-        "min_entry_price": .16, "max_entry_price": .93,
+        "min_entry_price": .19, "max_entry_price": .93,
         "max_positions_per_condition": 1}}
     engine.store = type("S", (), {"open_positions": lambda self: [],
         "entry_allowed": lambda self, c, s, p: (True, "ok")})()
@@ -796,7 +822,7 @@ def test_risk_does_not_reject_wide_spread():
         "min_liquidity_usd": 0, "min_volume_usd": 0, "max_spread_pct": 1,
         "min_timing_score": 0, "min_model_edge_pct": 6,
         "require_known_event_start": False, "max_hours_before_event": 24,
-        "min_entry_price": .16, "max_entry_price": .93,
+        "min_entry_price": .19, "max_entry_price": .93,
         "max_positions_per_condition": 1}}
     engine.store = type("S", (), {"open_positions": lambda self: [],
         "entry_allowed": lambda self, c, s, p: (True, "ok")})()
@@ -814,7 +840,7 @@ def test_option_c_requires_three_point_independent_mispricing():
         "max_open_positions": 5, "min_liquidity_usd": 0,
         "min_volume_usd": 0, "min_timing_score": 0,
         "require_known_event_start": False, "max_hours_before_event": 24,
-        "min_entry_price": .16, "max_entry_price": .93,
+        "min_entry_price": .19, "max_entry_price": .93,
         "max_positions_per_condition": 1}}
     engine.store = type("S", (), {"open_positions": lambda self: [],
         "entry_allowed": lambda self, c, s, p: (True, "ok")})()
@@ -891,7 +917,7 @@ def test_dashboard_status_is_atomic_and_contains_operational_evidence(tmp_path):
     store.record_position("c", "t", "YES", 3, .3, "o", "Question",
                           "2030-01-01T00:00:00+00:00", "0.01", False)
     engine = Engine.__new__(Engine)
-    engine.cfg = {"mode": "live", "minimum_confidence": 65,
+    engine.cfg = {"mode": "live", "minimum_confidence": 70,
                   "risk": {"min_model_edge_pct": 6, "min_timing_score": 45,
                            "max_hours_before_event": 8},
                   "paths": {"status": str(tmp_path / "status.json")}}
@@ -901,25 +927,25 @@ def test_dashboard_status_is_atomic_and_contains_operational_evidence(tmp_path):
     assert status["connected"] is True and status["mode"] == "LIVE"
     assert status["markets"] == 1 and status["positions"] == 1
     assert status["deployed"] == 3 and status["evidence"]["gammaObservations"] == 1
-    assert status["control"]["minimumConfidence"] == 65
+    assert status["control"]["minimumConfidence"] == 70
     assert not (tmp_path / "status.json.tmp").exists()
 
 
 def test_invalid_dashboard_control_fails_closed(tmp_path):
     engine = Engine.__new__(Engine)
-    engine.cfg = {"minimum_confidence": 65,
+    engine.cfg = {"minimum_confidence": 70,
                   "risk": {"min_model_edge_pct": 6, "min_timing_score": 45,
                            "max_hours_before_event": 8}}
     engine._control_path = tmp_path / "control.json"
     engine._control_path.write_text('{"minimumConfidence": 10}')
     control = engine._load_runtime_control()
     assert control["paused"] is True
-    assert control["minimumConfidence"] == 65
+    assert control["minimumConfidence"] == 70
 
 
 def test_legacy_model_edge_control_is_discarded(tmp_path):
     engine = Engine.__new__(Engine)
-    engine.cfg = {"minimum_confidence": 65,
+    engine.cfg = {"minimum_confidence": 70,
                   "risk": {"min_timing_score": 0,
                            "max_hours_before_event": 24}}
     engine._control_path = tmp_path / "control.json"
@@ -929,4 +955,5 @@ def test_legacy_model_edge_control_is_discarded(tmp_path):
         '"maxHoursBeforeEvent":24}')
     control = engine._load_runtime_control()
     assert control["paused"] is False
+    assert control["minimumConfidence"] == 70
     assert "minModelEdgePct" not in control
