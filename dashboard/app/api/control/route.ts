@@ -14,7 +14,7 @@ type Control = {
 
 const defaults: Control = {
   paused: false,
-  minimumConfidence: 65,
+  minimumConfidence: 70,
   minTimingScore: 0,
   maxHoursBeforeEvent: 24,
 };
@@ -33,11 +33,20 @@ function bounded(value: unknown, name: string, minimum: number, maximum: number)
 async function current(): Promise<Control> {
   try {
     const parsed = JSON.parse(await readFile(controlFile(), "utf8"));
+    const savedMinimumConfidence = Number(parsed.minimumConfidence);
+    const savedTimingScore = Number(parsed.minTimingScore);
+    const savedEntryWindow = Number(parsed.maxHoursBeforeEvent);
     return {
       paused: Boolean(parsed.paused ?? defaults.paused),
-      minimumConfidence: Number(parsed.minimumConfidence ?? defaults.minimumConfidence),
-      minTimingScore: Number(parsed.minTimingScore ?? defaults.minTimingScore),
-      maxHoursBeforeEvent: Number(parsed.maxHoursBeforeEvent ?? defaults.maxHoursBeforeEvent),
+      minimumConfidence: Number.isFinite(savedMinimumConfidence)
+        ? Math.max(70, Math.min(90, savedMinimumConfidence))
+        : defaults.minimumConfidence,
+      minTimingScore: Number.isFinite(savedTimingScore)
+        ? Math.max(0, Math.min(90, savedTimingScore))
+        : defaults.minTimingScore,
+      maxHoursBeforeEvent: Number.isFinite(savedEntryWindow)
+        ? Math.max(1, Math.min(24, savedEntryWindow))
+        : defaults.maxHoursBeforeEvent,
       updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : undefined,
     };
   } catch {
@@ -69,7 +78,7 @@ export async function POST(request: Request) {
     const body = await request.json();
     const next: Control = {
       paused: Boolean(body.paused),
-      minimumConfidence: bounded(body.minimumConfidence, "Confidence", 65, 90),
+      minimumConfidence: bounded(body.minimumConfidence, "Confidence", 70, 90),
       minTimingScore: bounded(body.minTimingScore, "Timing score", 0, 90),
       maxHoursBeforeEvent: bounded(body.maxHoursBeforeEvent, "Entry window", 1, 24),
       updatedAt: new Date().toISOString(),
