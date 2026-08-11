@@ -75,8 +75,8 @@ def combine(market: Market, yes_book: BookSignal, no_book: BookSignal,
     executable = yes_book.best_ask if side == "YES" else no_book.best_ask
     # Edge must come only from the probability model.  The same order book
     # supplies both the executable ask and the bounded confirmation adjustment;
-    # allowing that adjustment into edge would let market pressure manufacture
-    # the six-point independent-edge gate it is supposed to confirm.
+    # Model edge remains a diagnostic comparison against the executable ask;
+    # it is not an entry gate and does not affect position size.
     model_probability = base_confidence / 100
     model_edge_pct = (model_probability - executable) * 100
     pricing_edge = max(0, min(100, 50 + model_edge_pct * 2))
