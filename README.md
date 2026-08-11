@@ -48,7 +48,8 @@ onchain redemption is required.
 ## Authenticated dashboard controls
 
 The dashboard can tune a strict whitelist without exposing wallet credentials:
-minimum confidence (70–90), timing confirmation (0–90), known-event entry
+minimum confidence (65–90), with a fixed maximum tradeable confidence of 93%;
+timing confirmation (0–90), known-event entry
 window (1–24 hours), and pause/resume for new entries.
 Resolution reconciliation continues while entries are paused. Changes are validated twice: once by
 the dashboard API and again by the bot. Invalid control files fail closed by
