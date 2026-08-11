@@ -16,6 +16,7 @@ from mentionbot.transcript_history import (count_phrase, market_history_shape,
                                            parse_govinfo_transcript)
 from mentionbot.subtitle_history import EpisodeTarget, infer_episode_target, subtitle_text
 from mentionbot.youtube_history import (SOURCE_KIND, SupadataYouTubeHistory,
+                                        YouTubeVideo, _published_before_event,
                                         comparable_event_query)
 
 
@@ -62,6 +63,22 @@ def test_repeated_condition_entry_is_rejected(tmp_path):
                               "Trump", "other")
     positions = store.open_positions()
     assert len(positions) == 1 and positions[0]["order_id"] == "first"
+
+
+def test_pending_reservation_blocks_duplicate_and_finalizes_atomically(tmp_path):
+    store = Store(str(tmp_path / "state.db"), str(tmp_path / "journal.jsonl"))
+    store.reserve_order("c", "t", "YES", 3, "Question",
+                        "2030-01-01T00:00:00Z", "0.01", False,
+                        "Trump", "word")
+    assert store.entry_allowed("c", "Trump", "word") == (
+        False, "condition already entered")
+    assert len(store.pending_orders()) == 1
+    store.update_pending_order("c", "order-1", "matched")
+    store.record_position("c", "t", "YES", 3, .3, "order-1", "Question",
+                          "2030-01-01T00:00:00Z", "0.01", False,
+                          "Trump", "word")
+    assert store.pending_orders() == []
+    assert store.open_positions()[0]["order_id"] == "order-1"
 
 
 def test_legacy_position_table_migrates_without_losing_open_trade(tmp_path):
@@ -377,6 +394,58 @@ def test_persistent_book_confirmation_is_bounded_and_arbitrage_is_absent():
     assert base.book_adjustment == 0
     assert score.book_adjustment == 5
     assert score.confidence <= (expected_probability + 5)
+    # Market-derived confirmation may change the displayed tier confidence,
+    # but it must never manufacture independent edge against the same book.
+    assert score.model_edge_pct == base.model_edge_pct
+
+
+def test_missing_youtube_publication_date_is_not_historical_evidence():
+    market = Market("c", "q", "e", "s", "es",
+        datetime.now(timezone.utc) + timedelta(hours=2),
+        datetime.now(timezone.utc) + timedelta(hours=3), "y", "n", .5, .5,
+        1000, 1000, False, "0.01", "Anyone", "word", "interview")
+    undated = YouTubeVideo("abc12345", "Comparable episode", "",
+                           "https://youtube.com/watch?v=abc12345")
+    assert _published_before_event(undated, market) is False
+
+
+def test_supadata_async_transcript_job_is_polled(monkeypatch):
+    history = SupadataYouTubeHistory({"youtube_history": {
+        "enabled": True, "job_poll_timeout_sec": 5,
+        "job_poll_interval_sec": 1}})
+    replies = iter(({"jobId": "job-1"}, {"content": "Security was mentioned."}))
+    paths = []
+    history._get = lambda path, params: (paths.append(path), next(replies))[1]
+    monkeypatch.setattr("mentionbot.youtube_history.time.sleep", lambda _: None)
+    video = YouTubeVideo("abc12345", "Episode", "2026-08-01T00:00:00Z",
+                         "https://youtube.com/watch?v=abc12345")
+    assert history._transcript(video) == "Security was mentioned."
+    assert paths == ["/transcript", "/transcript/job-1"]
+
+
+def test_closed_positions_use_documented_pagination():
+    calls = []
+
+    class Response:
+        def __init__(self, payload): self.payload = payload
+        def raise_for_status(self): pass
+        def json(self): return self.payload
+
+    class Session:
+        def get(self, url, params, timeout):
+            calls.append(dict(params))
+            count = 50 if params["offset"] == 0 else 2
+            return Response([{"asset": str(i)} for i in range(count)])
+
+    data = PolymarketData.__new__(PolymarketData)
+    data.data_api = "https://data-api.polymarket.com"
+    data.session = Session()
+    rows = data.portfolio_positions("0x" + "1" * 40, closed=True)
+    assert len(rows) == 52
+    assert calls == [
+        {"user": "0x" + "1" * 40, "limit": 50, "offset": 0},
+        {"user": "0x" + "1" * 40, "limit": 50, "offset": 50},
+    ]
 
 
 def test_official_transcript_counts_only_president_and_overrides_gamma(tmp_path):
@@ -455,6 +524,25 @@ def test_risk_uses_executable_ask_not_cached_gamma_price():
     score = Score(80, 80, "YES", "B", 4, 50, 50, 50, 50, 10, "")
     book = BookSignal(50, .93, .95, 2, 1000, 1000)
     assert engine.risk_ok(market, score, book) == (False, "executable entry price gate")
+
+
+def test_risk_requires_enough_near_ask_depth_for_the_order():
+    engine = Engine.__new__(Engine)
+    engine.cfg = {"risk": {"kill_switch_file": "/never", "max_open_positions": 5,
+        "min_liquidity_usd": 0, "min_volume_usd": 0, "max_spread_pct": 100,
+        "min_timing_score": 0, "min_model_edge_pct": 6,
+        "require_known_event_start": False, "max_hours_before_event": 24,
+        "min_entry_price": .16, "max_entry_price": .93,
+        "max_positions_per_condition": 1}}
+    engine.store = type("S", (), {"open_positions": lambda self: [],
+        "entry_allowed": lambda self, c, s, p: (True, "ok")})()
+    market = Market("c", "q", "e", "s", "es", None,
+        datetime.now(timezone.utc) + timedelta(hours=3), "y", "n", .5, .5,
+        0, 0, False, "0.01", "Trump", "word", "speech")
+    score = Score(75, 75, "YES", "C", 3, 50, 50, 50, 50, 10, "")
+    book = BookSignal(50, .39, .40, 2, 100, 2.99)
+    assert engine.risk_ok(market, score, book) == (
+        False, "insufficient executable ask depth")
 
 
 def test_discovery_prioritizes_tradeable_candidates_before_outside_window():

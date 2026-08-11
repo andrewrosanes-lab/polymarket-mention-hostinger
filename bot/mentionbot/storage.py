@@ -46,6 +46,23 @@ CREATE TABLE IF NOT EXISTS entry_locks (
   entry_day TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pending_orders (
+  condition_id TEXT PRIMARY KEY,
+  token_id TEXT NOT NULL,
+  side TEXT NOT NULL,
+  intended_size_usd REAL NOT NULL,
+  subject_key TEXT NOT NULL,
+  phrase_key TEXT NOT NULL,
+  entry_day TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  order_id TEXT,
+  order_status TEXT NOT NULL DEFAULT 'reserved',
+  last_error TEXT NOT NULL DEFAULT '',
+  question TEXT NOT NULL DEFAULT '',
+  end_date TEXT,
+  tick_size TEXT NOT NULL DEFAULT '0.01',
+  neg_risk INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS daily_pnl (
   day TEXT PRIMARY KEY,
   realized_usd REAL NOT NULL DEFAULT 0
@@ -480,6 +497,84 @@ class Store:
             return False, "word mention already entered today"
         return True, "ok"
 
+    def reserve_order(self, condition_id: str, token_id: str, side: str,
+                      size_usd: float, question: str, end_date: str,
+                      tick_size: str, neg_risk: bool, subject: str,
+                      phrase: str) -> None:
+        """Persist an entry lock before any order reaches the network."""
+        now = datetime.now(timezone.utc).isoformat()
+        entry_day = datetime.now(timezone.utc).date().isoformat()
+        subject_key = self.entry_key(subject)
+        phrase_key = self.entry_key(phrase)
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            # Re-check while holding the write lock.  This keeps the condition
+            # and daily-word guard atomic if a second process is ever started
+            # accidentally against the same state database.
+            allowed, reason = self.entry_allowed(
+                condition_id, subject, phrase, entry_day)
+            if not allowed:
+                raise RuntimeError(f"entry reservation rejected: {reason}")
+            self.db.execute(
+                """INSERT INTO entry_locks
+                   (condition_id,subject_key,phrase_key,entry_day,created_at)
+                   VALUES(?,?,?,?,?)""",
+                (condition_id, subject_key, phrase_key, entry_day, now),
+            )
+            self.db.execute(
+                """INSERT INTO pending_orders
+                   (condition_id,token_id,side,intended_size_usd,subject_key,
+                    phrase_key,entry_day,created_at,question,end_date,tick_size,neg_risk)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (condition_id, token_id, side, float(size_usd), subject_key,
+                 phrase_key, entry_day, now, question, end_date, tick_size,
+                 int(neg_risk)),
+            )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def update_pending_order(self, condition_id: str,
+                             order_id: str | None = None,
+                             status: str | None = None,
+                             error: str | None = None) -> None:
+        fields, values = [], []
+        if order_id:
+            fields.append("order_id=?")
+            values.append(str(order_id))
+        if status:
+            fields.append("order_status=?")
+            values.append(str(status))
+        if error is not None:
+            fields.append("last_error=?")
+            values.append(str(error)[:500])
+        if not fields:
+            return
+        values.append(condition_id)
+        self.db.execute(
+            f"UPDATE pending_orders SET {','.join(fields)} WHERE condition_id=?",
+            values,
+        )
+        self.db.commit()
+
+    def pending_orders(self) -> list[sqlite3.Row]:
+        return list(self.db.execute(
+            "SELECT * FROM pending_orders ORDER BY created_at"))
+
+    def release_order_reservation(self, condition_id: str) -> None:
+        """Release only an order proven not to have reached the book."""
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            self.db.execute(
+                "DELETE FROM pending_orders WHERE condition_id=?", (condition_id,))
+            self.db.execute(
+                "DELETE FROM entry_locks WHERE condition_id=?", (condition_id,))
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
     def record_position(self, condition_id: str, token_id: str, side: str,
                         size: float, price: float, order_id: str | None,
                         question: str, end_date: str, tick_size: str,
@@ -489,16 +584,20 @@ class Store:
         entry_day = datetime.now(timezone.utc).date().isoformat()
         subject_key = self.entry_key(subject)
         phrase_key = self.entry_key(phrase)
-        allowed, reason = self.entry_allowed(
-            condition_id, subject, phrase, entry_day)
-        if not allowed:
-            raise RuntimeError(f"entry lock rejected confirmed position: {reason}")
-        self.db.execute(
-            """INSERT INTO entry_locks
-               (condition_id,subject_key,phrase_key,entry_day,created_at)
-               VALUES(?,?,?,?,?)""",
-            (condition_id, subject_key, phrase_key, entry_day, now),
-        )
+        pending = self.db.execute(
+            "SELECT 1 FROM pending_orders WHERE condition_id=?", (condition_id,)
+        ).fetchone()
+        if not pending:
+            allowed, reason = self.entry_allowed(
+                condition_id, subject, phrase, entry_day)
+            if not allowed:
+                raise RuntimeError(f"entry lock rejected confirmed position: {reason}")
+            self.db.execute(
+                """INSERT INTO entry_locks
+                   (condition_id,subject_key,phrase_key,entry_day,created_at)
+                   VALUES(?,?,?,?,?)""",
+                (condition_id, subject_key, phrase_key, entry_day, now),
+            )
         cursor = self.db.execute(
             """INSERT INTO positions
                (condition_id,token_id,side,size_usd,entry_price,status,opened_at,
@@ -508,6 +607,8 @@ class Store:
             (condition_id, token_id, side, size, price, now, order_id, price,
              question, end_date, tick_size, int(neg_risk), subject_key, phrase_key),
         )
+        self.db.execute(
+            "DELETE FROM pending_orders WHERE condition_id=?", (condition_id,))
         self.db.commit()
         Path(self.journal).parent.mkdir(parents=True, exist_ok=True)
         with open(self.journal, "a") as fh:

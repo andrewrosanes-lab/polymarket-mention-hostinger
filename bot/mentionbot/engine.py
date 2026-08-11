@@ -8,7 +8,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .execution import build
+from .execution import DefinitelyNotFilled, build
 from .market import PolymarketData
 from .scoring import combine, historical_score, probability_from_evidence
 from .storage import Store
@@ -119,6 +119,8 @@ class Engine:
                 return False, f"more than {max_hours:g} hours before event"
         if not r["min_entry_price"] <= book.best_ask <= r["max_entry_price"]:
             return False, "executable entry price gate"
+        if book.ask_depth + 1e-9 < score.size_usd:
+            return False, "insufficient executable ask depth"
         entry_allowed, reason = self.store.entry_allowed(
             market.condition_id, market.subject, market.phrase)
         if not entry_allowed:
@@ -283,10 +285,33 @@ class Engine:
                 })
                 if not ok:
                     log.info("SKIP %s: %s", market.question, reason); continue
-                fill = self.executor.buy(
-                    market, score.side, score.size_usd, trade_book,
-                    score.confidence / 100, float(control["minModelEdgePct"]))
                 token = market.yes_token if score.side == "YES" else market.no_token
+                self.store.reserve_order(
+                    market.condition_id, token, score.side, score.size_usd,
+                    market.question, market.end_date.isoformat(),
+                    market.tick_size, market.neg_risk, market.subject,
+                    market.phrase)
+                try:
+                    fill = self.executor.buy(
+                        market, score.side, score.size_usd, trade_book,
+                        # Taker fallback must preserve independent model edge;
+                        # order-book confidence cannot fund this probability.
+                        (score.yes_probability if score.side == "YES"
+                         else 100 - score.yes_probability) / 100,
+                        float(control["minModelEdgePct"]),
+                        on_submitted=lambda order_id, status: self.store.update_pending_order(
+                            market.condition_id, order_id, status),
+                    )
+                except DefinitelyNotFilled:
+                    self.store.release_order_reservation(market.condition_id)
+                    raise
+                except Exception as exc:
+                    # Unknown network/order outcomes remain locked.  A later
+                    # wallet reconciliation can adopt a real fill; the next
+                    # cycle must never submit a duplicate condition order.
+                    self.store.update_pending_order(
+                        market.condition_id, status="uncertain", error=str(exc))
+                    raise
                 self.store.record_position(market.condition_id, token, score.side,
                                            fill.size_usd, fill.price, fill.order_id,
                                            market.question, market.end_date.isoformat(),
@@ -329,6 +354,7 @@ class Engine:
                     "maxPositionsPerContract": 1,
                 },
                 "redeemable": len(self.store.redeemable_positions()),
+                "pendingOrders": len(self.store.pending_orders()),
                 "control": getattr(self, "_runtime_control", self._control_defaults()),
             }
             temporary = path.with_suffix(path.suffix + ".tmp")
@@ -340,7 +366,8 @@ class Engine:
     def reconcile_positions(self) -> None:
         """Hold every trade to resolution and reconcile it from Polymarket."""
         positions = self.store.open_positions()
-        if not positions:
+        pending = self.store.pending_orders()
+        if not positions and not pending:
             return
         address = os.environ.get("POLYMARKET_FUNDER_ADDRESS", "")
         if not address:
@@ -356,6 +383,28 @@ class Engine:
                            for item in current}
         closed_by_token = {str(item.get("asset") or item.get("tokenId") or ""): item
                            for item in closed}
+        for order in pending:
+            active = active_by_token.get(str(order["token_id"]))
+            if not active:
+                continue
+            try:
+                shares = float(active.get("size") or 0)
+                price = float(active.get("avgPrice") or 0)
+                if shares <= 0 or not 0 < price < 1:
+                    continue
+                size_usd = shares * price
+                self.store.record_position(
+                    order["condition_id"], order["token_id"], order["side"],
+                    size_usd, price, order["order_id"], order["question"],
+                    order["end_date"], order["tick_size"],
+                    bool(order["neg_risk"]), order["subject_key"],
+                    order["phrase_key"])
+                log.warning(
+                    "RECONCILED PENDING FILL %s $%.2f @ %.3f order=%s",
+                    order["question"], size_usd, price, order["order_id"])
+            except Exception:
+                log.exception("pending order reconciliation failed: %s",
+                              order["condition_id"])
         for position in positions:
             token_id = str(position["token_id"])
             active = active_by_token.get(token_id)

@@ -72,9 +72,12 @@ def combine(market: Market, yes_book: BookSignal, no_book: BookSignal,
             min(maximum_adjustment, (book_confirmation - 50.0) * adjustment_scale),
         )
     confidence = max(50.0, min(100.0, base_confidence + book_adjustment))
-    adjusted_probability = confidence / 100
     executable = yes_book.best_ask if side == "YES" else no_book.best_ask
-    model_probability = adjusted_probability
+    # Edge must come only from the probability model.  The same order book
+    # supplies both the executable ask and the bounded confirmation adjustment;
+    # allowing that adjustment into edge would let market pressure manufacture
+    # the six-point independent-edge gate it is supposed to confirm.
+    model_probability = base_confidence / 100
     model_edge_pct = (model_probability - executable) * 100
     pricing_edge = max(0, min(100, 50 + model_edge_pct * 2))
     tier, size = tier_for(confidence, cfg["tiers"])
@@ -84,6 +87,7 @@ def combine(market: Market, yes_book: BookSignal, no_book: BookSignal,
                    f"market_prior={market_prior:.1f}; book_confirmation={book_confirmation:.1f} "
                    f"(n={book_samples}, adjustment={book_adjustment:+.1f}); "
                    f"timing={timing:.1f}; pricing_edge={pricing_edge:.1f}; "
+                   f"base_confidence={base_confidence:.1f}; "
                    f"model_edge={model_edge_pct:.1f}%")
     return Score(yes, confidence, side, tier, size, hist, yes_book.score,
                  momentum, pricing_edge, model_edge_pct,

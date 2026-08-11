@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from .models import BookSignal, Market
 
 
+class DefinitelyNotFilled(RuntimeError):
+    """The executor proved that no shares were bought."""
+
+
 @dataclass(frozen=True)
 class Fill:
     order_id: str | None
@@ -36,7 +40,7 @@ class PaperExecutor:
 
     def buy(self, market: Market, side: str, usd: float, book: BookSignal,
             model_probability: float | None = None,
-            minimum_edge_pct: float = 0.0) -> Fill:
+            minimum_edge_pct: float = 0.0, on_submitted=None) -> Fill:
         price = maker_price(book, market.tick_size,
                             self.cfg["execution"]["price_buffer_ticks"])
         return Fill("paper-maker", price, usd, usd / price)
@@ -77,7 +81,7 @@ class LiveExecutor:
 
     def buy(self, market: Market, side: str, usd: float, book: BookSignal,
             model_probability: float | None = None,
-            minimum_edge_pct: float = 0.0) -> Fill:
+            minimum_edge_pct: float = 0.0, on_submitted=None) -> Fill:
         token = market.yes_token if side == "YES" else market.no_token
         price = maker_price(book, market.tick_size,
                             self.cfg["execution"]["price_buffer_ticks"])
@@ -90,10 +94,12 @@ class LiveExecutor:
         )
         order_id = result.get("orderID") if isinstance(result, dict) else getattr(result, "order_id", None)
         status = result.get("status", "") if isinstance(result, dict) else getattr(result, "status", "")
+        if order_id and on_submitted:
+            on_submitted(str(order_id), str(status or "submitted"))
         if status.lower() == "matched":
             return _response_fill(result, "BUY", price)
         if not order_id:
-            raise RuntimeError(f"maker order rejected: {result}")
+            raise DefinitelyNotFilled(f"maker order rejected: {result}")
 
         deadline = time.monotonic() + self.cfg["execution"]["maker_timeout_sec"]
         while time.monotonic() < deadline:
@@ -118,7 +124,7 @@ class LiveExecutor:
         max_price = min(0.99, book.best_ask * (1 + slippage_bps / 10_000))
         if (model_probability is not None and
                 (float(model_probability) - max_price) * 100 < minimum_edge_pct):
-            raise RuntimeError(
+            raise DefinitelyNotFilled(
                 "taker fallback cancelled: slippage erased the required model edge")
         taker = self.client.create_and_post_market_order(
             order_args=self.MarketOrderArgs(token_id=token, amount=usd,
@@ -126,6 +132,12 @@ class LiveExecutor:
             options=self.Options(tick_size=market.tick_size, neg_risk=market.neg_risk),
             order_type=self.OrderType.FAK,
         )
+        taker_id = (taker.get("orderID") or taker.get("order_id")) \
+            if isinstance(taker, dict) else getattr(taker, "order_id", None)
+        taker_status = taker.get("status", "") if isinstance(taker, dict) \
+            else getattr(taker, "status", "")
+        if taker_id and on_submitted:
+            on_submitted(str(taker_id), str(taker_status or "submitted"))
         return _response_fill(taker, "BUY", book.best_ask)
 
     def sell(self, token_id: str, shares: float, price: float, tick_size: str,
