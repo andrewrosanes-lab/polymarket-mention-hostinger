@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .execution import (DefinitelyNotFilled, build, capped_taker_price,
-                        maker_price, profit_lock_floor)
+                        maker_price, profit_lock_eligible, profit_lock_floor)
 from .market import PolymarketData
 from .microstructure import MarketMicrostructure
 from .scoring import (combine, historical_score, independent_probability,
@@ -474,6 +474,8 @@ class Engine:
                     "profitLockStages": ["+50% -> break-even",
                                           "+100% -> +50%",
                                           "+200% -> +100%"],
+                    "profitLockEntryRange": "$0.19-$0.449...",
+                    "profitLockExemptEntryRange": "$0.45-$0.93",
                 },
                 "redeemable": len(self.store.redeemable_positions()),
                 "pendingOrders": len(self.store.pending_orders()),
@@ -493,6 +495,8 @@ class Engine:
         for position in self.store.open_positions():
             try:
                 entry = float(position["entry_price"])
+                if not profit_lock_eligible(entry, profit_cfg):
+                    continue
                 book = self.data.book(str(position["token_id"]))
                 peak = self.store.update_peak(
                     int(position["position_id"]), max(entry, book.best_bid))
