@@ -22,12 +22,14 @@ def _validate(cfg: dict) -> None:
         weights = cfg.get(group) or {}
         if not weights or any(float(value) <= 0 for value in weights.values()):
             raise ValueError(f"{group} must contain positive weights")
-    if float(cfg["minimum_confidence"]) < 50:
-        raise ValueError("minimum_confidence must be at least 50")
+    if float(cfg["minimum_confidence"]) < 70:
+        raise ValueError("Option C minimum_confidence must be at least 70")
     tiers = sorted(cfg["tiers"], key=lambda x: x["min_confidence"])
     for tier in tiers:
         if tier["min_confidence"] >= tier["max_confidence"]:
             raise ValueError(f"invalid tier {tier['name']}")
+    if float(tiers[0]["min_confidence"]) != 70:
+        raise ValueError("Option C Tier C must begin at 70 confidence")
     risk = cfg.get("risk") or {}
     if int(risk.get("max_positions_per_condition", 1)) != 1:
         raise ValueError("max_positions_per_condition must remain 1")
@@ -51,6 +53,9 @@ def _validate(cfg: dict) -> None:
         raise ValueError("Option C confidence weights must sum to 1")
     if float(risk.get("min_model_mispricing_pct", 0)) != 3:
         raise ValueError("Option C requires exactly three points of model mispricing")
+    if float(risk.get("min_entry_price", 0)) != .19 or float(
+            risk.get("max_entry_price", 0)) != .93:
+        raise ValueError("Option C entry prices must remain between 0.19 and 0.93")
     microstructure = cfg.get("microstructure") or {}
     if not microstructure.get("enabled", False):
         raise ValueError("Option C requires live microstructure")
