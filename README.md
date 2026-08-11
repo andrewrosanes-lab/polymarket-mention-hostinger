@@ -39,9 +39,11 @@ executed flow, delta OBI, persistence, and microprice; adverse absorption vetoes
 entry. Liquidity and volume remain execution-capacity inputs, never confidence.
 
 Each condition can be entered only once for its lifetime. A normalized
-subject/phrase can be entered only once per UTC day. Positions are held through
-resolution; resolved positions are reconciled against Polymarket's portfolio
-data and flagged when onchain redemption is required.
+subject/phrase can be entered only once per UTC day. A maker-only staged profit
+lock arms break-even after +50%, +50% profit after +100%, and +100% profit after
++200%. There is no loss exit or taker fallback; an unfilled maker can miss the
+floor. Remaining positions are reconciled through resolution and flagged when
+onchain redemption is required.
 
 ## Authenticated dashboard controls
 
