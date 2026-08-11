@@ -33,6 +33,15 @@ def _validate(cfg: dict) -> None:
         raise ValueError("max_positions_per_condition must remain 1")
     if float(risk.get("max_hours_before_event", 0)) > 24:
         raise ValueError("max_hours_before_event cannot exceed 24")
+    execution = cfg.get("execution") or {}
+    if str(execution.get("taker_fallback_order_type", "")).upper() != "FOK":
+        raise ValueError("mention taker fallback must remain FOK")
+    taker_window = float(execution.get("taker_window_hours", 0))
+    if not 0 < taker_window <= float(risk.get("max_hours_before_event", 24)):
+        raise ValueError("taker_window_hours must be inside the event-entry window")
+    maker_timeout = float(execution.get("maker_timeout_sec", 0))
+    if not 30 <= maker_timeout <= 60:
+        raise ValueError("maker_timeout_sec must remain between 30 and 60 seconds")
     youtube = cfg.get("youtube_history") or {}
     if youtube.get("option_c_armed"):
         if not youtube.get("shadow_only_until_calibrated", False):
