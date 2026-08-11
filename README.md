@@ -31,11 +31,12 @@ TV subtitle statistics are isolated by series, and markets without phrase-level
 evidence receive a neutral history input instead of a generic cross-market
 fallback. News and arbitrage are excluded from scoring and the dashboard.
 
-Historical context and the current market prior estimate mention probability.
-Persistent order-book pressure requires three samples and may adjust confidence
-by no more than five points. Liquidity and volume remain $200 hard execution
-gates but never add confidence. Model edge is displayed as a diagnostic only;
-it is not an entry requirement or a position-sizing input.
+Option C uses 30% historical mentions, 20% event/context relevance, 15% market
+prior, 25% live microstructure, and 10% momentum. The independent mention model
+chooses direction and must exceed the actual entry price by at least three
+percentage points. Live microstructure requires five-level weighted OBI,
+executed flow, delta OBI, persistence, and microprice; adverse absorption vetoes
+entry. Liquidity and volume remain execution-capacity inputs, never confidence.
 
 Each condition can be entered only once for its lifetime. A normalized
 subject/phrase can be entered only once per UTC day. Positions are held through
