@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .execution import (DefinitelyNotFilled, build, capped_taker_price,
-                        maker_price)
+                        maker_price, profit_lock_floor)
 from .market import PolymarketData
 from .microstructure import MarketMicrostructure
 from .scoring import (combine, historical_score, independent_probability,
@@ -185,6 +185,7 @@ class Engine:
         except Exception:
             log.exception("Supadata YouTube shadow refresh failed; retaining existing evidence")
         self.reconcile_positions()
+        self.manage_profit_locks()
         log.info("discovered %d mention markets", len(markets))
         signals = []
         for market in markets:
@@ -455,7 +456,8 @@ class Engine:
                 "evidence": evidence,
                 "strategy": {
                     "directional": True,
-                    "holdUntilResolution": True,
+                    "holdUntilResolution": False,
+                    "exitPolicy": "MAKER_ONLY_STAGED_PROFIT_LOCK",
                     "maxPositionsPerContract": 1,
                     "makerOrderType": "GTD_POST_ONLY",
                     "makerEffectiveLifetimeSec": int(
@@ -468,6 +470,9 @@ class Engine:
                     "minimumModelMispricingPct": float(
                         self.cfg["risk"].get("min_model_mispricing_pct", 3)),
                     "microstructureWeightPct": 25,
+                    "profitLockStages": ["+50% -> break-even",
+                                          "+100% -> +50%",
+                                          "+200% -> +100%"],
                 },
                 "redeemable": len(self.store.redeemable_positions()),
                 "pendingOrders": len(self.store.pending_orders()),
@@ -479,8 +484,41 @@ class Engine:
         except Exception:
             log.exception("failed to write dashboard status")
 
+    def manage_profit_locks(self) -> None:
+        """Run maker-only staged profit exits; never sell a losing position."""
+        profit_cfg = (self.cfg.get("execution") or {}).get("profit_lock") or {}
+        if not profit_cfg.get("enabled"):
+            return
+        for position in self.store.open_positions():
+            try:
+                entry = float(position["entry_price"])
+                book = self.data.book(str(position["token_id"]))
+                peak = self.store.update_peak(
+                    int(position["position_id"]), max(entry, book.best_bid))
+                floor_price = profit_lock_floor(
+                    entry, peak, profit_cfg.get("stages") or [])
+                if floor_price is None or book.best_bid > floor_price + 1e-9:
+                    continue
+                shares = float(position["size_usd"]) / entry
+                try:
+                    fill = self.executor.sell_maker(
+                        str(position["token_id"]), shares, book, floor_price,
+                        str(position["tick_size"]), bool(position["neg_risk"]))
+                except DefinitelyNotFilled as exc:
+                    log.info("MAKER PROFIT EXIT UNFILLED %s floor=%.3f: %s",
+                             position["question"], floor_price, exc)
+                    continue
+                pnl = self.store.close_position(
+                    int(position["position_id"]), fill.price,
+                    fill.order_id, fill.shares)
+                log.warning("MAKER PROFIT EXIT %s floor=%.3f fill=%.3f pnl=$%.2f",
+                            position["question"], floor_price, fill.price, pnl)
+            except Exception:
+                log.exception("profit-lock management failed: %s",
+                              position["condition_id"])
+
     def reconcile_positions(self) -> None:
-        """Hold every trade to resolution and reconcile it from Polymarket."""
+        """Reconcile positions that remain open through market resolution."""
         positions = self.store.open_positions()
         pending = self.store.pending_orders()
         if not positions and not pending:
