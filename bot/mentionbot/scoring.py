@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .models import BookSignal, Market, Score
+from .models import BookSignal, Market, MicrostructureSignal, Score
 
 
 def historical_score(hits: int, total: int) -> float:
@@ -19,6 +19,14 @@ def tier_for(confidence: float, tiers: list[dict]) -> tuple[str | None, float]:
     return None, 0.0
 
 
+def context_confidence(scope: str, samples: int) -> float:
+    """Measure evidence relevance/coverage without choosing YES or NO."""
+    trust = min(1.0, max(0, samples) / 12)
+    if "cross-context" in scope or "neutral" in scope:
+        return 50 + 25 * trust
+    return 50 + 50 * trust
+
+
 def probability_from_evidence(hist: float, history_samples: int,
                               market_prior: float, weights: dict,
                               youtube_history: float | None = None,
@@ -35,13 +43,29 @@ def probability_from_evidence(hist: float, history_samples: int,
     return max(0, min(100, probability))
 
 
+def independent_probability(hist: float, history_samples: int,
+                            youtube_history: float | None = None,
+                            youtube_samples: int = 0) -> float:
+    """Probability from mention evidence only; excludes market microstructure."""
+    evidence = []
+    if history_samples > 0:
+        evidence.append((hist, .30))
+    if youtube_history is not None and youtube_samples > 0:
+        evidence.append((youtube_history, .20))
+    if not evidence:
+        return 50.0
+    return sum(value * weight for value, weight in evidence) / sum(
+        weight for _, weight in evidence)
+
+
 def combine(market: Market, yes_book: BookSignal, no_book: BookSignal,
             hist: float, market_prior: float, momentum: float, cfg: dict,
             history_scope: str = "exact",
             history_samples: int = 0, book_confirmation: float = 50.0,
             book_samples: int = 0, youtube_history: float | None = None,
             youtube_samples: int = 0,
-            probability_weights_override: dict | None = None) -> Score:
+            probability_weights_override: dict | None = None,
+            microstructure: MicrostructureSignal | None = None) -> Score:
     """Estimate direction, then apply a small persistent-book confirmation.
 
     News and complement-price arbitrage are deliberately excluded. Order-book
@@ -50,9 +74,11 @@ def combine(market: Market, yes_book: BookSignal, no_book: BookSignal,
     exist.
     """
     probability_weights = probability_weights_override or cfg["probability_weights"]
-    yes = probability_from_evidence(
-        hist, history_samples, market_prior, probability_weights,
-        youtube_history, youtube_samples)
+    yes = (independent_probability(
+        hist, history_samples, youtube_history, youtube_samples)
+        if microstructure is not None else probability_from_evidence(
+            hist, history_samples, market_prior, probability_weights,
+            youtube_history, youtube_samples))
     side = "YES" if yes >= 50 else "NO"
     base_confidence = yes if side == "YES" else 100 - yes
     selected_book = yes_book if side == "YES" else no_book
@@ -71,7 +97,33 @@ def combine(market: Market, yes_book: BookSignal, no_book: BookSignal,
             -maximum_adjustment,
             min(maximum_adjustment, (book_confirmation - 50.0) * adjustment_scale),
         )
-    confidence = max(50.0, min(100.0, base_confidence + book_adjustment))
+    if microstructure is None:
+        confidence = max(50.0, min(100.0, base_confidence + book_adjustment))
+        context_score = context_confidence(history_scope, history_samples)
+        micro_ready = False
+        absorption = False
+    else:
+        selected_hist = hist if side == "YES" else 100 - hist
+        selected_prior = market_prior if side == "YES" else 100 - market_prior
+        selected_context = (
+            youtube_history if side == "YES" else 100 - youtube_history
+        ) if youtube_history is not None and youtube_samples > 0 else context_confidence(
+            history_scope, history_samples)
+        weights = cfg["option_c_confidence_weights"]
+        confidence = (
+            selected_hist * float(weights["historical_mentions"])
+            + selected_context * float(weights["event_context"])
+            + selected_prior * float(weights["market_prior"])
+            + microstructure.score * float(weights["microstructure"])
+            + selected_momentum * float(weights["momentum"])
+        ) / sum(float(value) for value in weights.values())
+        confidence = max(50.0, min(100.0, confidence))
+        context_score = selected_context
+        micro_ready = microstructure.ready
+        absorption = microstructure.absorption
+        book_adjustment = confidence - base_confidence
+        book_confirmation = microstructure.score
+        book_samples = microstructure.samples
     executable = yes_book.best_ask if side == "YES" else no_book.best_ask
     # Edge must come only from the probability model.  The same order book
     # supplies both the executable ask and the bounded confirmation adjustment;
@@ -92,4 +144,5 @@ def combine(market: Market, yes_book: BookSignal, no_book: BookSignal,
     return Score(yes, confidence, side, tier, size, hist, yes_book.score,
                  momentum, pricing_edge, model_edge_pct,
                  explanation, timing, book_confirmation,
-                 book_adjustment, book_samples)
+                 book_adjustment, book_samples, base_confidence,
+                 context_score, micro_ready, absorption)
