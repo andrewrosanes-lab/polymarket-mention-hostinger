@@ -16,19 +16,20 @@ with the weather bot.
 | Hard gate | Model mispricing | 3 points | Independent mention probability versus actual order price |
 
 The independent historical/context model selects YES or NO. Final Option C
-confidence must be 70–100, while the independent model must exceed the actual
+confidence must be 65–93, while the independent model must exceed the actual
 maker price or worst FOK price by at least three points. Scores in the middle,
 microstructure windows without at least 20 seconds of persistent snapshots and
 executed flow, and absorption signals do not trade.
 
 | Tier | Confidence | Position |
 |---|---:|---:|
-| C | 70–<80 | $3 |
+| C | 65–<80 | $3 |
 | B | 80–<90 | $4 |
-| A | 90–100 | $5 |
+| A | 90–93 | $5 |
 
 The authenticated dashboard may tighten Tier C's effective minimum up to 90,
-but can never lower it below 70. It can also tighten timing and the known-event
+but can never lower it below 65. Confidence above 93 is explicitly rejected.
+The dashboard can also tighten timing and the known-event
 window, or pause new entries. Resolution reconciliation remains
 active while entries are paused.
 
