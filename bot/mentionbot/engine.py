@@ -114,8 +114,8 @@ class Engine:
         if score.timing_score < min_timing:
             return False, f"timing score below {min_timing:g}"
         micro_cfg = self.cfg.get("microstructure") or {}
-        if micro_cfg.get("enabled", False) and not score.microstructure_ready:
-            return False, "live microstructure window not ready"
+        # A warming microstructure window contributes its neutral score and is
+        # reported diagnostically, but it is not an entry blocker.
         if score.absorption and micro_cfg.get("absorption_veto", True):
             return False, "adverse price absorption"
         if market.event_start is None:
@@ -273,16 +273,14 @@ class Engine:
                 elif score.confidence < minimum_confidence or not score.tier:
                     ok, reason = False, f"confidence below {minimum_confidence:g}%"
                 else:
-                    if total < int(self.cfg["risk"].get(
-                            "minimum_independent_samples", 5)):
-                        ok, reason = False, "insufficient independent mention history"
-                    else:
-                        intended_price = maker_price(
-                            trade_book, market.tick_size,
-                            self.cfg["execution"]["price_buffer_ticks"])
-                        ok, reason = self.risk_ok(
-                            market, score, trade_book, control,
-                            entry_price=intended_price)
+                    # Missing mention history remains visible and neutral in
+                    # scoring; it no longer blocks an otherwise valid entry.
+                    intended_price = maker_price(
+                        trade_book, market.tick_size,
+                        self.cfg["execution"]["price_buffer_ticks"])
+                    ok, reason = self.risk_ok(
+                        market, score, trade_book, control,
+                        entry_price=intended_price)
                 signals.append({
                     "question": market.question,
                     "side": score.side,
