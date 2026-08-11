@@ -545,6 +545,24 @@ def test_risk_requires_enough_near_ask_depth_for_the_order():
         False, "insufficient executable ask depth")
 
 
+def test_risk_does_not_reject_wide_spread():
+    engine = Engine.__new__(Engine)
+    engine.cfg = {"risk": {"kill_switch_file": "/never", "max_open_positions": 5,
+        "min_liquidity_usd": 0, "min_volume_usd": 0, "max_spread_pct": 1,
+        "min_timing_score": 0, "min_model_edge_pct": 6,
+        "require_known_event_start": False, "max_hours_before_event": 24,
+        "min_entry_price": .16, "max_entry_price": .93,
+        "max_positions_per_condition": 1}}
+    engine.store = type("S", (), {"open_positions": lambda self: [],
+        "entry_allowed": lambda self, c, s, p: (True, "ok")})()
+    market = Market("c", "q", "e", "s", "es", None,
+        datetime.now(timezone.utc) + timedelta(hours=3), "y", "n", .5, .5,
+        0, 0, False, "0.01", "Trump", "word", "speech")
+    score = Score(75, 75, "YES", "C", 3, 50, 50, 50, 50, 10, "")
+    book = BookSignal(50, .16, .40, 150, 100, 100)
+    assert engine.risk_ok(market, score, book) == (True, "ok")
+
+
 def test_discovery_prioritizes_tradeable_candidates_before_outside_window():
     data = PolymarketData.__new__(PolymarketData)
     data.cfg = {"max_candidates_per_cycle": 3, "risk": {
