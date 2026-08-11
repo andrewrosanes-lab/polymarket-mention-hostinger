@@ -149,6 +149,16 @@ execution:
   taker_max_slippage_bps: 300
   trade_confirmation_timeout_sec: 45
   trade_confirmation_poll_sec: 2
+  # Maker-only staged profit protection. This is not a stop-loss: no exit
+  # floor exists until price first gains 50%, and no floor is below entry.
+  profit_lock:
+    enabled: true
+    maker_only: true
+    maker_timeout_sec: 45
+    stages:
+      - {trigger_gain_pct: 50, lock_gain_pct: 0}
+      - {trigger_gain_pct: 100, lock_gain_pct: 50}
+      - {trigger_gain_pct: 200, lock_gain_pct: 100}
   paper_slippage_bps: 50
   signature_type: 3
   chain_id: 137
