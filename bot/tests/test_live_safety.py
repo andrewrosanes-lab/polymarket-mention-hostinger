@@ -18,7 +18,7 @@ from mentionbot.microstructure import calculate_signal
 from mentionbot.models import BookSignal, Market, MicrostructureSignal, Score
 from mentionbot.market import PolymarketData
 from mentionbot.news import NewsScorer
-from mentionbot.scoring import combine, independent_probability
+from mentionbot.scoring import combine, independent_probability, tier_for
 from mentionbot.storage import Store
 from mentionbot.transcript_history import (count_phrase, market_history_shape,
                                            parse_govinfo_transcript)
@@ -34,8 +34,9 @@ def test_production_option_c_limits_are_locked(monkeypatch):
     monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", "test-key")
     monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", "0x" + "1" * 40)
     _validate(cfg)
-    assert cfg["minimum_confidence"] == 70
-    assert cfg["tiers"][0]["min_confidence"] == 70
+    assert cfg["minimum_confidence"] == 65
+    assert cfg["tiers"][0]["min_confidence"] == 65
+    assert cfg["tiers"][-1]["max_confidence"] == 93
     assert cfg["risk"]["min_entry_price"] == .19
     assert cfg["risk"]["max_entry_price"] == .93
     assert cfg["execution"]["profit_lock"]["maker_only"] is True
@@ -46,9 +47,26 @@ def test_production_option_c_limits_are_locked(monkeypatch):
         _validate(too_cheap)
 
     too_lenient = deepcopy(cfg)
-    too_lenient["minimum_confidence"] = 69
-    with pytest.raises(ValueError, match="at least 70"):
+    too_lenient["minimum_confidence"] = 64
+    with pytest.raises(ValueError, match="must remain 65"):
         _validate(too_lenient)
+
+
+def test_confidence_band_includes_65_and_93_but_rejects_outside():
+    tiers = [
+        {"name": "C", "min_confidence": 65, "max_confidence": 80,
+         "size_usd": 3},
+        {"name": "B", "min_confidence": 80, "max_confidence": 90,
+         "size_usd": 4},
+        {"name": "A", "min_confidence": 90, "max_confidence": 93,
+         "size_usd": 5},
+    ]
+    assert tier_for(64.99, tiers) == (None, 0.0)
+    assert tier_for(65, tiers) == ("C", 3.0)
+    assert tier_for(80, tiers) == ("B", 4.0)
+    assert tier_for(90, tiers) == ("A", 5.0)
+    assert tier_for(93, tiers) == ("A", 5.0)
+    assert tier_for(93.01, tiers) == (None, 0.0)
 
 
 def test_staged_profit_floor_never_creates_a_loss_exit():
@@ -964,7 +982,7 @@ def test_dashboard_status_is_atomic_and_contains_operational_evidence(tmp_path):
     store.record_position("c", "t", "YES", 3, .3, "o", "Question",
                           "2030-01-01T00:00:00+00:00", "0.01", False)
     engine = Engine.__new__(Engine)
-    engine.cfg = {"mode": "live", "minimum_confidence": 70,
+    engine.cfg = {"mode": "live", "minimum_confidence": 65,
                   "risk": {"min_model_edge_pct": 6, "min_timing_score": 45,
                            "max_hours_before_event": 8},
                   "paths": {"status": str(tmp_path / "status.json")}}
@@ -974,25 +992,25 @@ def test_dashboard_status_is_atomic_and_contains_operational_evidence(tmp_path):
     assert status["connected"] is True and status["mode"] == "LIVE"
     assert status["markets"] == 1 and status["positions"] == 1
     assert status["deployed"] == 3 and status["evidence"]["gammaObservations"] == 1
-    assert status["control"]["minimumConfidence"] == 70
+    assert status["control"]["minimumConfidence"] == 65
     assert not (tmp_path / "status.json.tmp").exists()
 
 
 def test_invalid_dashboard_control_fails_closed(tmp_path):
     engine = Engine.__new__(Engine)
-    engine.cfg = {"minimum_confidence": 70,
+    engine.cfg = {"minimum_confidence": 65,
                   "risk": {"min_model_edge_pct": 6, "min_timing_score": 45,
                            "max_hours_before_event": 8}}
     engine._control_path = tmp_path / "control.json"
     engine._control_path.write_text('{"minimumConfidence": 10}')
     control = engine._load_runtime_control()
     assert control["paused"] is True
-    assert control["minimumConfidence"] == 70
+    assert control["minimumConfidence"] == 65
 
 
 def test_legacy_model_edge_control_is_discarded(tmp_path):
     engine = Engine.__new__(Engine)
-    engine.cfg = {"minimum_confidence": 70,
+    engine.cfg = {"minimum_confidence": 65,
                   "risk": {"min_timing_score": 0,
                            "max_hours_before_event": 24}}
     engine._control_path = tmp_path / "control.json"
@@ -1002,5 +1020,5 @@ def test_legacy_model_edge_control_is_discarded(tmp_path):
         '"maxHoursBeforeEvent":24}')
     control = engine._load_runtime_control()
     assert control["paused"] is False
-    assert control["minimumConfidence"] == 70
+    assert control["minimumConfidence"] == 65
     assert "minModelEdgePct" not in control
