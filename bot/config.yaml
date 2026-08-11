@@ -118,13 +118,19 @@ news:
 
 execution:
   maker_first: true
-  maker_timeout_sec: 20
+  # GTD post-only quotes have a 45-second effective lifetime. Outside the
+  # two-hour urgency window, an unfilled maker simply expires and the next
+  # cycle re-evaluates it; no taker order is allowed.
+  maker_timeout_sec: 45
   maker_poll_sec: 2
-  taker_fallback_order_type: FAK
+  taker_window_hours: 2
+  taker_fallback_order_type: FOK
   price_buffer_ticks: 1
   # Taker fallback is dynamically bounded to the requested 1%-3% range.
   taker_min_slippage_bps: 100
   taker_max_slippage_bps: 300
+  trade_confirmation_timeout_sec: 45
+  trade_confirmation_poll_sec: 2
   paper_slippage_bps: 50
   signature_type: 3
   chain_id: 137
@@ -132,7 +138,7 @@ execution:
 
 # Gamma does not always publish the actual speech/kickoff time. Add ISO-8601
 # Optional UTC overrides by event slug. Entries require a known start and must
-# be no more than eight hours away.
+# be no more than 24 hours away.
 scheduled_events: {}
 # Example:
 # scheduled_events:
