@@ -31,22 +31,27 @@ TV subtitle statistics are isolated by series, and markets without phrase-level
 evidence receive a neutral history input instead of a generic cross-market
 fallback. News and arbitrage are excluded from scoring and the dashboard.
 
-Historical context and the current market prior estimate mention probability.
-Persistent order-book pressure requires three samples and may adjust confidence
-by no more than five points. Liquidity and volume remain $200 hard execution
-gates but never add confidence. The executable ask must still leave at least
-six percentage points of model edge.
+Option C uses 30% historical mentions, 20% event/context relevance, 15% market
+prior, 25% live microstructure, and 10% momentum. The independent mention model
+chooses direction and must exceed the actual entry price by at least three
+percentage points. Live microstructure requires five-level weighted OBI,
+executed flow, delta OBI, persistence, and microprice; adverse absorption vetoes
+entry. Liquidity and volume remain execution-capacity inputs, never confidence.
 
 Each condition can be entered only once for its lifetime. A normalized
-subject/phrase can be entered only once per UTC day. Positions are held through
-resolution; resolved positions are reconciled against Polymarket's portfolio
-data and flagged when onchain redemption is required.
+subject/phrase can be entered only once per UTC day. A maker-only staged profit
+lock arms break-even after +50%, +50% profit after +100%, and +100% profit after
++200%. There is no loss exit or taker fallback; an unfilled maker can miss the
+floor. It applies only to entry prices below $0.45. Trades entered from $0.45
+through $0.93 have no profit lock and remain held through resolution. Remaining
+positions are reconciled and flagged when onchain redemption is required.
 
 ## Authenticated dashboard controls
 
 The dashboard can tune a strict whitelist without exposing wallet credentials:
-minimum confidence (65–90), minimum model edge (6–20%), timing confirmation
-(45–90), known-event entry window (1–8 hours), and pause/resume for new entries.
+minimum confidence (65–90), with a fixed maximum tradeable confidence of 93%;
+timing confirmation (0–90), known-event entry
+window (1–24 hours), and pause/resume for new entries.
 Resolution reconciliation continues while entries are paused. Changes are validated twice: once by
 the dashboard API and again by the bot. Invalid control files fail closed by
 pausing new entries.

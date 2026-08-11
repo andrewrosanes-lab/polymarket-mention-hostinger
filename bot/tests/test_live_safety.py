@@ -1,18 +1,25 @@
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
+from copy import deepcopy
 import json
+from pathlib import Path
 import sqlite3
 
 import pytest
+import yaml
 
+from mentionbot.config import _validate
 from mentionbot.engine import Engine
 from mentionbot.execution import (DefinitelyNotFilled, LiveExecutor,
                                   _response_fill, capped_taker_price,
+                                  maker_sell_price, profit_lock_eligible,
+                                  profit_lock_floor,
                                   taker_window_open)
-from mentionbot.models import BookSignal, Market, Score
+from mentionbot.microstructure import calculate_signal
+from mentionbot.models import BookSignal, Market, MicrostructureSignal, Score
 from mentionbot.market import PolymarketData
 from mentionbot.news import NewsScorer
-from mentionbot.scoring import combine
+from mentionbot.scoring import combine, independent_probability, tier_for
 from mentionbot.storage import Store
 from mentionbot.transcript_history import (count_phrase, market_history_shape,
                                            parse_govinfo_transcript)
@@ -20,6 +27,101 @@ from mentionbot.subtitle_history import EpisodeTarget, infer_episode_target, sub
 from mentionbot.youtube_history import (SOURCE_KIND, SupadataYouTubeHistory,
                                         YouTubeVideo, _published_before_event,
                                         comparable_event_query)
+
+
+def test_production_option_c_limits_are_locked(monkeypatch):
+    config_path = Path(__file__).parents[1] / "config.yaml"
+    cfg = yaml.safe_load(config_path.read_text())
+    monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", "test-key")
+    monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", "0x" + "1" * 40)
+    _validate(cfg)
+    assert cfg["minimum_confidence"] == 65
+    assert cfg["tiers"][0]["min_confidence"] == 65
+    assert cfg["tiers"][-1]["max_confidence"] == 93
+    assert cfg["risk"]["min_entry_price"] == .19
+    assert cfg["risk"]["max_entry_price"] == .93
+    assert cfg["execution"]["profit_lock"]["maker_only"] is True
+    assert cfg["execution"]["profit_lock"]["max_entry_price_exclusive"] == .45
+
+    too_cheap = deepcopy(cfg)
+    too_cheap["risk"]["min_entry_price"] = .18
+    with pytest.raises(ValueError, match="0.19 and 0.93"):
+        _validate(too_cheap)
+
+    too_lenient = deepcopy(cfg)
+    too_lenient["minimum_confidence"] = 64
+    with pytest.raises(ValueError, match="must remain 65"):
+        _validate(too_lenient)
+
+
+def test_confidence_band_includes_65_and_93_but_rejects_outside():
+    tiers = [
+        {"name": "C", "min_confidence": 65, "max_confidence": 80,
+         "size_usd": 3},
+        {"name": "B", "min_confidence": 80, "max_confidence": 90,
+         "size_usd": 4},
+        {"name": "A", "min_confidence": 90, "max_confidence": 93,
+         "size_usd": 5},
+    ]
+    assert tier_for(64.99, tiers) == (None, 0.0)
+    assert tier_for(65, tiers) == ("C", 3.0)
+    assert tier_for(80, tiers) == ("B", 4.0)
+    assert tier_for(90, tiers) == ("A", 5.0)
+    assert tier_for(93, tiers) == ("A", 5.0)
+    assert tier_for(93.01, tiers) == (None, 0.0)
+
+
+def test_staged_profit_floor_never_creates_a_loss_exit():
+    stages = [
+        {"trigger_gain_pct": 50, "lock_gain_pct": 0},
+        {"trigger_gain_pct": 100, "lock_gain_pct": 50},
+        {"trigger_gain_pct": 200, "lock_gain_pct": 100},
+    ]
+    assert profit_lock_floor(.20, .29, stages) is None
+    assert profit_lock_floor(.20, .30, stages) == pytest.approx(.20)
+    assert profit_lock_floor(.20, .40, stages) == pytest.approx(.30)
+    assert profit_lock_floor(.20, .60, stages) == pytest.approx(.40)
+
+
+def test_profit_lock_exempts_entries_from_45_to_93_cents():
+    cfg = {"enabled": True, "max_entry_price_exclusive": .45}
+    assert profit_lock_eligible(.19, cfg) is True
+    assert profit_lock_eligible(.4499, cfg) is True
+    assert profit_lock_eligible(.45, cfg) is False
+    assert profit_lock_eligible(.93, cfg) is False
+
+
+def test_profit_exit_is_post_only_gtd_and_never_falls_back_to_taker():
+    calls = {"maker": None, "cancel": 0, "taker": 0}
+
+    class Client:
+        def create_and_post_order(self, **kwargs):
+            calls["maker"] = kwargs
+            return {"orderID": "exit", "status": "live"}
+        def get_order(self, order_id):
+            return {"size_matched": "0", "associate_trades": []}
+        def cancel_order(self, payload):
+            calls["cancel"] += 1
+        def create_and_post_market_order(self, **kwargs):
+            calls["taker"] += 1
+            pytest.fail("profit exit must never use a taker order")
+
+    executor = LiveExecutor.__new__(LiveExecutor)
+    executor.cfg = {"execution": {"profit_lock": {"maker_timeout_sec": 0},
+                                   "maker_poll_sec": 0}}
+    executor.client = Client()
+    executor.OrderArgs = lambda **kwargs: kwargs
+    executor.OrderPayload = lambda **kwargs: kwargs
+    executor.Options = lambda **kwargs: kwargs
+    executor.Side = type("Side", (), {"SELL": "SELL"})
+    executor.OrderType = type("OrderType", (), {"GTD": "GTD"})
+    book = BookSignal(50, .29, .31, 2, 100, 100)
+    assert maker_sell_price(book, .30, "0.01") == .30
+    with pytest.raises(DefinitelyNotFilled, match="no taker used"):
+        executor.sell_maker("token", 10, book, .30, "0.01", False)
+    assert calls["maker"]["post_only"] is True
+    assert calls["maker"]["order_type"] == "GTD"
+    assert calls["cancel"] == 1 and calls["taker"] == 0
 
 
 def test_confirmed_buy_and_sell_amounts():
@@ -48,13 +150,58 @@ def test_taker_window_is_time_aware():
     assert taker_window_open(market(None), cfg, now) is False
 
 
-def test_taker_cap_preserves_all_three_price_limits():
+def test_taker_cap_uses_slippage_and_absolute_price_limits_only():
     book = BookSignal(50, .39, .40, 20, 100, 100)
     cfg = {"taker_min_slippage_bps": 100, "taker_max_slippage_bps": 300}
-    # Slippage cap is 0.412, model-edge cap is 0.44, absolute cap is 0.93.
-    assert capped_taker_price(book, .50, 6, .93, "0.01", cfg) == .41
-    # A weaker model makes the edge cap the strictest limit.
-    assert capped_taker_price(book, .465, 6, .93, "0.01", cfg) == .40
+    assert capped_taker_price(book, .93, "0.01", cfg) == .41
+    expensive = BookSignal(50, .92, .93, 2, 100, 100)
+    assert capped_taker_price(expensive, .93, "0.01", cfg) == .93
+
+
+def test_option_c_microstructure_composite_requires_live_persistence_and_flow():
+    samples = [
+        (0.0, .20, .50, 60),
+        (10.0, .30, .51, 65),
+        (21.0, .40, .52, 70),
+    ]
+    signal = calculate_signal(samples, [(15.0, 8.0, .51), (20.0, 2.0, .52)])
+    assert signal.ready is True
+    assert signal.wobi == .40 and signal.delta_obi == .20
+    assert signal.trade_flow == 1 and signal.persistence == 1
+    assert signal.absorption is False and signal.score > 75
+    assert calculate_signal(samples[:2], [(5.0, 1.0, .50)]).ready is False
+
+
+def test_option_c_absorption_veto_detects_buying_without_price_response():
+    samples = [(0.0, .30, .50, 60), (10.0, .35, .50, 60),
+               (21.0, .40, .50, 60)]
+    signal = calculate_signal(samples, [(10.0, 5.0, .50), (20.0, 5.0, .50)])
+    assert signal.ready and signal.absorption
+
+
+def test_option_c_weights_sum_to_confidence_without_changing_direction():
+    cfg = {
+        "probability_weights": {"historical_context": .35, "market_prior": .14},
+        "timing_weights": {"order_book_imbalance": .20, "momentum": .14},
+        "book_confidence": {},
+        "option_c_confidence_weights": {
+            "historical_mentions": .30, "event_context": .20,
+            "market_prior": .15, "microstructure": .25, "momentum": .10,
+        },
+        "tiers": [{"name": "C", "min_confidence": 70,
+                   "max_confidence": 80, "size_usd": 3}],
+    }
+    market = Market("c", "q", "e", "s", "es", None,
+        datetime.now(timezone.utc) + timedelta(hours=2), "y", "n", .5, .5,
+        0, 0, False, "0.01", "Trump", "word", "speech")
+    yes_book = BookSignal(90, .39, .40, 2, 100, 100)
+    no_book = BookSignal(10, .59, .60, 2, 100, 100)
+    micro = MicrostructureSignal(score=90, ready=True, samples=5)
+    score = combine(market, yes_book, no_book, 70, 60, 80, cfg,
+                    "exact phrase/context", 12, microstructure=micro)
+    assert independent_probability(70, 12) == 70
+    assert score.side == "YES" and score.independent_probability == 70
+    assert score.confidence == 80.5
 
 
 def test_unfilled_maker_outside_two_hours_never_calls_taker(monkeypatch):
@@ -89,7 +236,7 @@ def test_unfilled_maker_outside_two_hours_never_calls_taker(monkeypatch):
     monkeypatch.setattr("mentionbot.execution.time.time", lambda: 1000)
 
     with pytest.raises(DefinitelyNotFilled, match="outside two-hour"):
-        executor.buy(market, "YES", 3, book, .60, 6,
+        executor.buy(market, "YES", 3, book,
                      refresh_for_taker=lambda: pytest.fail("no refresh"))
     assert calls["maker"]["order_type"] == "GTD"
     assert calls["maker"]["order_args"]["expiration"] == 1060
@@ -123,7 +270,7 @@ def test_partial_maker_fill_is_not_topped_up_with_taker():
     executor.OrderType = type("OrderType", (), {"GTD": "GTD", "FOK": "FOK"})
     executor.Side = type("Side", (), {"BUY": "BUY"})
     executor._wait_for_confirmation = lambda trade_ids: None
-    fill = executor.buy(market, "YES", 3, book, .60, 6,
+    fill = executor.buy(market, "YES", 3, book,
                         refresh_for_taker=lambda: pytest.fail("no refresh"))
     assert fill.order_id == "maker" and fill.shares == 2
 
@@ -162,8 +309,8 @@ def test_inside_two_hours_uses_refreshed_capped_fok():
     executor.OrderType = type("OrderType", (), {"GTD": "GTD", "FOK": "FOK"})
     executor.Side = type("Side", (), {"BUY": "BUY"})
     executor._confirm_response = lambda result: calls.update(confirmed=result)
-    fill = executor.buy(market, "YES", 3, original, .60, 6,
-                        refresh_for_taker=lambda: (refreshed, .60))
+    fill = executor.buy(market, "YES", 3, original,
+                        refresh_for_taker=lambda: refreshed)
     assert calls["taker"]["order_type"] == "FOK"
     assert calls["taker"]["order_args"]["order_type"] == "FOK"
     assert calls["taker"]["order_args"]["price"] == .41
@@ -710,7 +857,7 @@ def test_risk_uses_executable_ask_not_cached_gamma_price():
     engine.cfg = {"risk": {"kill_switch_file": "/never", "max_open_positions": 5,
         "min_liquidity_usd": 800, "min_volume_usd": 800, "max_spread_pct": 12,
         "min_timing_score": 45, "min_model_edge_pct": 6, "require_known_event_start": False,
-        "max_hours_before_event": 8, "min_entry_price": .16, "max_entry_price": .93,
+        "max_hours_before_event": 8, "min_entry_price": .19, "max_entry_price": .93,
         "max_positions_per_condition": 1}}
     engine.store = type("S", (), {"open_positions": lambda self: [],
         "daily_loss": lambda self: -999,
@@ -731,7 +878,7 @@ def test_risk_requires_enough_near_ask_depth_for_the_order():
         "min_liquidity_usd": 0, "min_volume_usd": 0, "max_spread_pct": 100,
         "min_timing_score": 0, "min_model_edge_pct": 6,
         "require_known_event_start": False, "max_hours_before_event": 24,
-        "min_entry_price": .16, "max_entry_price": .93,
+        "min_entry_price": .19, "max_entry_price": .93,
         "max_positions_per_condition": 1}}
     engine.store = type("S", (), {"open_positions": lambda self: [],
         "entry_allowed": lambda self, c, s, p: (True, "ok")})()
@@ -750,7 +897,7 @@ def test_risk_does_not_reject_wide_spread():
         "min_liquidity_usd": 0, "min_volume_usd": 0, "max_spread_pct": 1,
         "min_timing_score": 0, "min_model_edge_pct": 6,
         "require_known_event_start": False, "max_hours_before_event": 24,
-        "min_entry_price": .16, "max_entry_price": .93,
+        "min_entry_price": .19, "max_entry_price": .93,
         "max_positions_per_condition": 1}}
     engine.store = type("S", (), {"open_positions": lambda self: [],
         "entry_allowed": lambda self, c, s, p: (True, "ok")})()
@@ -760,6 +907,30 @@ def test_risk_does_not_reject_wide_spread():
     score = Score(75, 75, "YES", "C", 3, 50, 50, 50, 50, 10, "")
     book = BookSignal(50, .16, .40, 150, 100, 100)
     assert engine.risk_ok(market, score, book) == (True, "ok")
+
+
+def test_option_c_requires_three_point_independent_mispricing():
+    engine = Engine.__new__(Engine)
+    engine.cfg = {"risk": {"kill_switch_file": "/never",
+        "max_open_positions": 5, "min_liquidity_usd": 0,
+        "min_volume_usd": 0, "min_timing_score": 0,
+        "require_known_event_start": False, "max_hours_before_event": 24,
+        "min_entry_price": .19, "max_entry_price": .93,
+        "max_positions_per_condition": 1}}
+    engine.store = type("S", (), {"open_positions": lambda self: [],
+        "entry_allowed": lambda self, c, s, p: (True, "ok")})()
+    market = Market("c", "q", "e", "s", "es", None,
+        datetime.now(timezone.utc) + timedelta(hours=3), "y", "n", .5, .5,
+        0, 0, False, "0.01", "Trump", "word", "speech")
+    rejected = Score(75, 75, "YES", "C", 3, 50, 50, 50, 0, -20, "",
+                     independent_probability=75)
+    expensive = BookSignal(50, .89, .90, 2, 100, 100)
+    assert engine.risk_ok(market, rejected, expensive) == (
+        False, "independent model mispricing below 3%")
+    accepted = Score(75, 75, "YES", "C", 3, 50, 50, 50, 0, 5, "",
+                     independent_probability=75)
+    cheap = BookSignal(50, .69, .70, 2, 100, 100)
+    assert engine.risk_ok(market, accepted, cheap) == (True, "ok")
 
 
 def test_discovery_prioritizes_tradeable_candidates_before_outside_window():
@@ -845,3 +1016,19 @@ def test_invalid_dashboard_control_fails_closed(tmp_path):
     control = engine._load_runtime_control()
     assert control["paused"] is True
     assert control["minimumConfidence"] == 65
+
+
+def test_legacy_model_edge_control_is_discarded(tmp_path):
+    engine = Engine.__new__(Engine)
+    engine.cfg = {"minimum_confidence": 65,
+                  "risk": {"min_timing_score": 0,
+                           "max_hours_before_event": 24}}
+    engine._control_path = tmp_path / "control.json"
+    engine._control_path.write_text(
+        '{"paused":false,"minimumConfidence":65,'
+        '"minModelEdgePct":20,"minTimingScore":0,'
+        '"maxHoursBeforeEvent":24}')
+    control = engine._load_runtime_control()
+    assert control["paused"] is False
+    assert control["minimumConfidence"] == 65
+    assert "minModelEdgePct" not in control

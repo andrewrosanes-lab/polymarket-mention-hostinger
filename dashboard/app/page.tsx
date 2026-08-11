@@ -8,10 +8,12 @@ type Signal = {
   modelEdge:number; marketPrior?:number; timingScore?:number;
   liquidity?:number; volume?:number; bookSpread?:number; entryAsk?:number;
   bookConfirmation?:number; bookAdjustment?:number; bookSamples?:number;
+  weightedObi?:number; tradeFlow?:number; deltaObi?:number; persistence?:number;
+  micropriceScore?:number; microstructureReady?:boolean; absorption?:boolean;
   strength?:string; route?:string; qualified:boolean; gate:string;
 };
 type Control = {
-  paused:boolean; minimumConfidence:number; minModelEdgePct:number;
+  paused:boolean; minimumConfidence:number;
   minTimingScore:number; maxHoursBeforeEvent:number; updatedAt?:string;
 };
 type Status = {
@@ -23,7 +25,7 @@ type Status = {
 };
 
 const defaultControl:Control = {
-  paused:false, minimumConfidence:65, minModelEdgePct:6,
+  paused:false, minimumConfidence:65,
   minTimingScore:0, maxHoursBeforeEvent:24,
 };
 const tags = [["105481","Trump speech"],["105482","Politics"],["105486","NFL"],["100343","Mentions"]];
@@ -100,7 +102,7 @@ export default function Home(){
     </header>
 
     <section className={`safetyBar ${control.paused?"paused":""}`} id="top">
-      <span>{control.paused?"Ⅱ":"●"}</span><div><b>{control.paused?"NEW ENTRIES PAUSED":"LIVE TRADING ARMED"}</b><small>{control.paused?"Existing positions are still monitored and managed.":"Every order must clear confidence, edge, timing, price, liquidity, and exposure gates."}</small></div>
+      <span>{control.paused?"Ⅱ":"●"}</span><div><b>{control.paused?"NEW ENTRIES PAUSED":"LIVE TRADING ARMED"}</b><small>{control.paused?"Existing positions are still monitored and managed.":"Every order must clear confidence, timing, price, depth, and exposure gates."}</small></div>
       <em>{status.mode||"LIVE"}</em>
     </section>
 
@@ -134,9 +136,8 @@ export default function Home(){
           <div className="panelHead"><div><p className="eyebrow">ACTIVE STRATEGY</p><h2>Guardrail stack</h2></div><button onClick={()=>setControlOpen(true)}>Edit</button></div>
           <div className="strategyState"><span className={control.paused?"amber":"green"}>{control.paused?"PAUSED":"ARMED"}</span><small>Changes apply on the next scan</small></div>
           <Gauge label="Minimum confidence" value={control.minimumConfidence} min={50} max={100} suffix="%"/>
-          <Gauge label="Model edge" value={control.minModelEdgePct} min={0} max={20} suffix="%"/>
           <Gauge label="Timing confirmation" value={control.minTimingScore} min={0} max={100}/>
-          <div className="miniRules"><div><span>ENTRY WINDOW</span><b>≤ {control.maxHoursBeforeEvent}h</b></div><div><span>WORD LIMIT</span><b>1 / UTC DAY</b></div><div><span>EXIT POLICY</span><b>HOLD TO RESOLVE</b></div><div><span>TIER C</span><b>65–79 · $3</b></div></div>
+          <div className="miniRules"><div><span>MODEL GAP</span><b>≥ 3 POINTS</b></div><div><span>PRICE RANGE</span><b>$0.19–$0.93</b></div><div><span>CONFIDENCE</span><b>65–93%</b></div><div><span>PROFIT LOCK</span><b>ENTRIES &lt; $0.45</b></div><div><span>$0.45–$0.93</span><b>HOLD TO RESOLVE</b></div><div><span>TIER C</span><b>65–79 · $3</b></div></div>
         </article>
 
         <article className="panel evidenceCard">
@@ -148,7 +149,7 @@ export default function Home(){
 
     <section className="system panel" id="system">
       <div><p className="eyebrow">SYSTEM MAP</p><h2>From evidence to execution</h2><p>Directional probability and execution quality stay separate so book conditions cannot manufacture outcome certainty.</p></div>
-      <div className="routeFlow"><RouteStep number="01" title="Estimate" text="Historical context + market prior"/><i>→</i><RouteStep number="02" title="Confirm" text="Persistent order-book pressure"/><i>→</i><RouteStep number="03" title="Gate" text="Edge + capacity + daily/condition locks"/><i>→</i><RouteStep number="04" title="Hold" text="Maker first, then hold through resolution"/></div>
+      <div className="routeFlow"><RouteStep number="01" title="Estimate" text="Historical context + market prior"/><i>→</i><RouteStep number="02" title="Confirm" text="Persistent order-book pressure"/><i>→</i><RouteStep number="03" title="Gate" text="Confidence + capacity + daily/condition locks"/><i>→</i><RouteStep number="04" title="Protect" text="Maker-only staged profit lock; otherwise resolve"/></div>
       <div className="tagRail">{tags.map(([id,name])=><span key={id}><b>{name}</b><small>#{id} · verified</small></span>)}</div>
     </section>
 
@@ -159,8 +160,7 @@ export default function Home(){
         <div className="modalHead"><div><p className="eyebrow">AUTHENTICATED CONTROLS</p><h2 id="control-title">Strategy control room</h2><p>Only whitelisted guardrails can change. Wallet credentials are never available here.</p></div><button onClick={()=>setControlOpen(false)} aria-label="Close control room">×</button></div>
         {!controlConfigured&&<div className="warning"><b>Admin controls are not configured.</b><span>Add a 24+ character DASHBOARD_ADMIN_TOKEN to the VPS environment, then rebuild the dashboard.</span></div>}
         <div className="controlGrid">
-          <ControlRange label="Minimum confidence" help="Tier C cannot go below 65%." value={control.minimumConfidence} min={65} max={90} step={1} suffix="%" onChange={value=>setControl({...control,minimumConfidence:value})}/>
-          <ControlRange label="Minimum model edge" help="The directional price advantage must remain at least 6%." value={control.minModelEdgePct} min={6} max={20} step={0.5} suffix="%" onChange={value=>setControl({...control,minModelEdgePct:value})}/>
+          <ControlRange label="Minimum confidence" help="Tier C cannot go below 65%; confidence above 93% is rejected." value={control.minimumConfidence} min={65} max={90} step={1} suffix="%" onChange={value=>setControl({...control,minimumConfidence:value})}/>
           <ControlRange label="Timing confirmation" help="Higher values demand stronger book and momentum agreement." value={control.minTimingScore} min={0} max={90} step={1} onChange={value=>setControl({...control,minTimingScore:value})}/>
           <ControlRange label="Entry window" help="How close the verified event start must be." value={control.maxHoursBeforeEvent} min={1} max={24} step={0.5} suffix="h" onChange={value=>setControl({...control,maxHoursBeforeEvent:value})}/>
         </div>
@@ -179,7 +179,7 @@ function Source({name,detail,on}:{name:string;detail:string;on:boolean}){return 
 function RouteStep({number,title,text}:{number:string;title:string;text:string}){return <div className="routeStep"><span>{number}</span><b>{title}</b><small>{text}</small></div>}
 function Toggle({checked,onChange,title,text,danger=false}:{checked:boolean;onChange:(next:boolean)=>void;title:string;text:string;danger?:boolean}){return <button type="button" className={`toggleRow ${danger?"danger":""}`} onClick={()=>onChange(!checked)} aria-pressed={checked}><span><b>{title}</b><small>{text}</small></span><i className={checked?"checked":""}><em/></i></button>}
 function ControlRange({label,help,value,min,max,step,suffix="",onChange}:{label:string;help:string;value:number;min:number;max:number;step:number;suffix?:string;onChange:(value:number)=>void}){return <label className="controlRange"><span><b>{label}</b><strong>{value}{suffix}</strong></span><input type="range" value={value} min={min} max={max} step={step} onChange={e=>onChange(Number(e.target.value))}/><small>{help}</small></label>}
-function SignalRow({signal}:{signal:Signal}){const route=signal.qualified?"DIRECTIONAL":"BLOCKED";return <details className="signalRow"><summary><span className={`side ${signal.side.toLowerCase()}`}>{signal.side}</span><span className="question"><b>{signal.question}</b><small>{signal.strength??route} · {signal.qualified?"all gates clear":signal.gate}</small></span><ScoreMini label="CONF" value={signal.confidence}/><ScoreMini label="EDGE" value={signal.modelEdge}/><ScoreMini label="BOOK" value={signal.bookConfirmation??50}/><span className={`routeBadge ${signal.qualified?"clear":""}`}>{route}</span><span className="chevron">⌄</span></summary><div className="signalDetail"><Evidence label="Historical pattern" value={`${signal.historyScore.toFixed(1)}%`} note={`${signal.historyScope} · ${signal.historySamples} comparable past events`}/><Evidence label="Book confirmation" value={`${(signal.bookConfirmation??50).toFixed(1)}%`} note={`${signal.bookSamples??0} persistent samples · ${(signal.bookAdjustment??0)>=0?"+":""}${(signal.bookAdjustment??0).toFixed(1)} confidence points`}/><Evidence label="Prior / timing" value={`${(signal.marketPrior??50).toFixed(1)} / ${(signal.timingScore??0).toFixed(1)}`} note="Outcome prior / execution confirmation"/><Evidence label="Execution safety" value={`$${(signal.liquidity??0).toFixed(0)} / $${(signal.volume??0).toFixed(0)}`} note={`Capacity gates only · ask ${(signal.entryAsk??0).toFixed(3)} · spread ${(signal.bookSpread??0).toFixed(1)}%`}/></div></details>}
+function SignalRow({signal}:{signal:Signal}){const route=signal.qualified?"DIRECTIONAL":"BLOCKED";return <details className="signalRow"><summary><span className={`side ${signal.side.toLowerCase()}`}>{signal.side}</span><span className="question"><b>{signal.question}</b><small>{signal.strength??route} · {signal.qualified?"all gates clear":signal.gate}</small></span><ScoreMini label="CONF" value={signal.confidence}/><ScoreMini label="GAP" value={signal.modelEdge}/><ScoreMini label="MICRO" value={signal.bookConfirmation??50}/><span className={`routeBadge ${signal.qualified?"clear":""}`}>{route}</span><span className="chevron">⌄</span></summary><div className="signalDetail"><Evidence label="Historical pattern" value={`${signal.historyScore.toFixed(1)}%`} note={`${signal.historyScope} · ${signal.historySamples} comparable past events`}/><Evidence label="Option C microstructure" value={`${(signal.bookConfirmation??50).toFixed(1)}%`} note={`WOBI ${(signal.weightedObi??0).toFixed(2)} · flow ${(signal.tradeFlow??0).toFixed(2)} · ΔOBI ${(signal.deltaObi??0).toFixed(2)} · ${signal.microstructureReady?"ready":"warming"}${signal.absorption?" · absorption veto":""}`}/><Evidence label="Prior / timing" value={`${(signal.marketPrior??50).toFixed(1)} / ${(signal.timingScore??0).toFixed(1)}`} note="Outcome prior / execution confirmation"/><Evidence label="Execution safety" value={`$${(signal.liquidity??0).toFixed(0)} / $${(signal.volume??0).toFixed(0)}`} note={`Capacity gates only · ask ${(signal.entryAsk??0).toFixed(3)} · spread ${(signal.bookSpread??0).toFixed(1)}%`}/></div></details>}
 function ScoreMini({label,value}:{label:string;value:number}){return <span className="scoreMini"><small>{label}</small><b>{value.toFixed(1)}</b></span>}
 function Evidence({label,value,note}:{label:string;value:string;note:string}){return <div className="evidence"><span>{label}</span><b>{value}</b><small>{note}</small></div>}
 function formatCycle(value?:string){if(!value)return "not connected";const date=new Date(value);return Number.isNaN(date.getTime())?value:date.toLocaleString([], {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit",second:"2-digit"})}

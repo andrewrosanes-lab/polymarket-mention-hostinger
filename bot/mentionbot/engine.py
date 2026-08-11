@@ -8,9 +8,12 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .execution import DefinitelyNotFilled, build, capped_taker_price
+from .execution import (DefinitelyNotFilled, build, capped_taker_price,
+                        maker_price, profit_lock_eligible, profit_lock_floor)
 from .market import PolymarketData
-from .scoring import combine, historical_score, probability_from_evidence
+from .microstructure import MarketMicrostructure
+from .scoring import (combine, historical_score, independent_probability,
+                      probability_from_evidence)
 from .storage import Store
 from .transcript_history import GovInfoHistory, market_history_shape
 from .subtitle_history import OpenSubtitlesHistory
@@ -28,6 +31,7 @@ class Engine:
         self.transcript_history = GovInfoHistory(cfg)
         self.subtitle_history = OpenSubtitlesHistory(cfg)
         self.youtube_history = SupadataYouTubeHistory(cfg)
+        self.microstructure = MarketMicrostructure(cfg)
         self._last_history_refresh = 0.0
         self._control_path = Path(os.getenv(
             "MENTION_BOT_CONTROL_FILE", "state/control.json"))
@@ -39,7 +43,6 @@ class Engine:
         return {
             "paused": False,
             "minimumConfidence": float(self.cfg["minimum_confidence"]),
-            "minModelEdgePct": float(risk["min_model_edge_pct"]),
             "minTimingScore": float(risk["min_timing_score"]),
             "maxHoursBeforeEvent": float(risk["max_hours_before_event"]),
         }
@@ -50,10 +53,12 @@ class Engine:
             if not self._control_path.exists():
                 return defaults
             payload = json.loads(self._control_path.read_text())
-            control = {**defaults, **payload}
+            # Copy only supported controls. This deliberately discards the
+            # retired minModelEdgePct field from existing state volumes.
+            control = {key: payload.get(key, default)
+                       for key, default in defaults.items()}
             limits = {
                 "minimumConfidence": (65, 90),
-                "minModelEdgePct": (6, 20),
                 "minTimingScore": (0, 90),
                 "maxHoursBeforeEvent": (1, 24),
             }
@@ -94,11 +99,11 @@ class Engine:
 
     def risk_ok(self, market, score, book, control: dict | None = None,
                 check_entry_lock: bool = True,
-                required_size_usd: float | None = None) -> tuple[bool, str]:
+                required_size_usd: float | None = None,
+                entry_price: float | None = None) -> tuple[bool, str]:
         r = self.cfg["risk"]
         control = control or getattr(self, "_runtime_control", {
             "minTimingScore": float(r["min_timing_score"]),
-            "minModelEdgePct": float(r["min_model_edge_pct"]),
             "maxHoursBeforeEvent": float(r["max_hours_before_event"]),
         })
         if os.path.exists(r["kill_switch_file"]): return False, "kill switch"
@@ -106,11 +111,13 @@ class Engine:
         if market.liquidity < r["min_liquidity_usd"]: return False, "low liquidity"
         if market.volume < r["min_volume_usd"]: return False, "low traded volume"
         min_timing = float(control["minTimingScore"])
-        min_edge = float(control["minModelEdgePct"])
         if score.timing_score < min_timing:
             return False, f"timing score below {min_timing:g}"
-        if score.model_edge_pct < min_edge:
-            return False, f"model edge below {min_edge:g}%"
+        micro_cfg = self.cfg.get("microstructure") or {}
+        if micro_cfg.get("enabled", False) and not score.microstructure_ready:
+            return False, "live microstructure window not ready"
+        if score.absorption and micro_cfg.get("absorption_veto", True):
+            return False, "adverse price absorption"
         if market.event_start is None:
             if r["require_known_event_start"]: return False, "unknown event start"
         else:
@@ -118,8 +125,13 @@ class Engine:
             max_hours = float(control["maxHoursBeforeEvent"])
             if hours > max_hours:
                 return False, f"more than {max_hours:g} hours before event"
-        if not r["min_entry_price"] <= book.best_ask <= r["max_entry_price"]:
+        execution_price = book.best_ask if entry_price is None else float(entry_price)
+        if not r["min_entry_price"] <= execution_price <= r["max_entry_price"]:
             return False, "executable entry price gate"
+        required_gap = float(r.get("min_model_mispricing_pct", 3))
+        gap = score.independent_probability - execution_price * 100
+        if gap + 1e-9 < required_gap:
+            return False, f"independent model mispricing below {required_gap:g}%"
         required_size = (score.size_usd if required_size_usd is None
                          else float(required_size_usd))
         if book.ask_depth + 1e-9 < required_size:
@@ -144,6 +156,9 @@ class Engine:
         control = self._runtime_control
         self.refresh_history()
         markets = self.data.discover()
+        self.microstructure.watch(
+            token for market in markets
+            for token in (market.yes_token, market.no_token))
         try:
             documents, rows, mentions = self.transcript_history.refresh(markets, self.store)
             if documents:
@@ -166,6 +181,7 @@ class Engine:
         except Exception:
             log.exception("Supadata YouTube shadow refresh failed; retaining existing evidence")
         self.reconcile_positions()
+        self.manage_profit_locks()
         log.info("discovered %d mention markets", len(markets))
         signals = []
         for market in markets:
@@ -229,30 +245,44 @@ class Engine:
                 active_youtube = youtube_shadow if youtube_active else None
                 active_youtube_samples = youtube_total if youtube_active else 0
                 active_weights = option_weights if youtube_active else None
-                provisional = combine(
-                    market, book, no_book, hist, market_prior, momentum,
-                    self.cfg, history_scope, total,
-                    youtube_history=active_youtube,
-                    youtube_samples=active_youtube_samples,
-                    probability_weights_override=active_weights)
-                confirmation, sample_count = (
-                    yes_confirmation if provisional.side == "YES" else no_confirmation)
+                independent_yes = independent_probability(
+                    hist, total, active_youtube, active_youtube_samples)
+                provisional_side = "YES" if independent_yes >= 50 else "NO"
+                selected_token = (market.yes_token if provisional_side == "YES"
+                                  else market.no_token)
+                micro = self.microstructure.signal(selected_token)
+                confirmation, sample_count = (yes_confirmation
+                    if provisional_side == "YES" else no_confirmation)
                 score = combine(
                     market, book, no_book, hist, market_prior, momentum,
                     self.cfg, history_scope, total,
                     confirmation, sample_count,
                     youtube_history=active_youtube,
                     youtube_samples=active_youtube_samples,
-                    probability_weights_override=active_weights)
+                    probability_weights_override=active_weights,
+                    microstructure=micro)
                 log.info("%s | %s %.1f | %s", market.question, score.side, score.confidence, score.explanation)
                 trade_book = book if score.side == "YES" else no_book
                 minimum_confidence = float(control["minimumConfidence"])
+                maximum_confidence = max(float(tier["max_confidence"])
+                                         for tier in self.cfg["tiers"])
                 if control["paused"]:
                     ok, reason = False, "new entries paused from dashboard"
+                elif score.confidence > maximum_confidence:
+                    ok, reason = False, f"confidence above {maximum_confidence:g}%"
                 elif score.confidence < minimum_confidence or not score.tier:
                     ok, reason = False, f"confidence below {minimum_confidence:g}%"
                 else:
-                    ok, reason = self.risk_ok(market, score, trade_book, control)
+                    if total < int(self.cfg["risk"].get(
+                            "minimum_independent_samples", 5)):
+                        ok, reason = False, "insufficient independent mention history"
+                    else:
+                        intended_price = maker_price(
+                            trade_book, market.tick_size,
+                            self.cfg["execution"]["price_buffer_ticks"])
+                        ok, reason = self.risk_ok(
+                            market, score, trade_book, control,
+                            entry_price=intended_price)
                 signals.append({
                     "question": market.question,
                     "side": score.side,
@@ -279,6 +309,13 @@ class Engine:
                     "bookConfirmation": round(score.book_confirmation, 1),
                     "bookAdjustment": round(score.book_adjustment, 1),
                     "bookSamples": score.book_samples,
+                    "weightedObi": round(micro.wobi, 3),
+                    "tradeFlow": round(micro.trade_flow, 3),
+                    "deltaObi": round(micro.delta_obi, 3),
+                    "persistence": round(micro.persistence, 3),
+                    "micropriceScore": round(micro.microprice_score, 1),
+                    "microstructureReady": micro.ready,
+                    "absorption": micro.absorption,
                     "strength": ("STRONG NO" if score.side == "NO" and
                                  score.confidence >= 70 else
                                  "STRONG YES" if score.side == "YES" and
@@ -307,17 +344,16 @@ class Engine:
                         if fresh_yes_book.best_ask >= fresh_yes_book.best_bid
                         else market.yes_price)
                     fresh_prior = max(0, min(100, fresh_midpoint * 100))
-                    fresh_provisional = combine(
-                        market, fresh_yes_book, fresh_no_book, hist,
-                        fresh_prior, fresh_momentum, self.cfg, history_scope,
-                        total, youtube_history=active_youtube,
-                        youtube_samples=active_youtube_samples,
-                        probability_weights_override=active_weights)
-                    fresh_selected_book = (
-                        fresh_yes_book if fresh_provisional.side == "YES"
-                        else fresh_no_book)
+                    fresh_independent_yes = independent_probability(
+                        hist, total, active_youtube, active_youtube_samples)
+                    fresh_side = "YES" if fresh_independent_yes >= 50 else "NO"
+                    fresh_selected_book = (fresh_yes_book if fresh_side == "YES"
+                                           else fresh_no_book)
+                    fresh_token = (market.yes_token if fresh_side == "YES"
+                                   else market.no_token)
+                    fresh_micro = self.microstructure.signal(fresh_token)
                     fresh_confirmation, fresh_samples = self._remember_book(
-                        market.yes_token if fresh_provisional.side == "YES"
+                        market.yes_token if fresh_side == "YES"
                         else market.no_token, fresh_selected_book.score)
                     fresh_score = combine(
                         market, fresh_yes_book, fresh_no_book, hist,
@@ -325,30 +361,31 @@ class Engine:
                         total, fresh_confirmation, fresh_samples,
                         youtube_history=active_youtube,
                         youtube_samples=active_youtube_samples,
-                        probability_weights_override=active_weights)
+                        probability_weights_override=active_weights,
+                        microstructure=fresh_micro)
                     if fresh_score.side != score.side:
                         raise DefinitelyNotFilled(
                             "taker fallback cancelled: model direction changed")
                     if (fresh_score.confidence < minimum_confidence
+                            or fresh_score.confidence > maximum_confidence
                             or not fresh_score.tier
                             or fresh_score.size_usd < score.size_usd):
                         raise DefinitelyNotFilled(
                             "taker fallback cancelled: refreshed confidence tier weakened")
+                    gap_cap = (fresh_score.independent_probability
+                               - float(self.cfg["risk"]["min_model_mispricing_pct"])) / 100
+                    maximum_taker_price = capped_taker_price(
+                        fresh_selected_book,
+                        min(float(self.cfg["risk"]["max_entry_price"]), gap_cap),
+                        market.tick_size, self.cfg["execution"])
                     allowed, fresh_reason = self.risk_ok(
                         market, fresh_score, fresh_selected_book, control,
                         check_entry_lock=False,
-                        required_size_usd=score.size_usd)
+                        required_size_usd=score.size_usd,
+                        entry_price=maximum_taker_price)
                     if not allowed:
                         raise DefinitelyNotFilled(
                             f"taker fallback cancelled: {fresh_reason}")
-                    fresh_probability = (
-                        fresh_score.yes_probability if fresh_score.side == "YES"
-                        else 100 - fresh_score.yes_probability) / 100
-                    maximum_taker_price = capped_taker_price(
-                        fresh_selected_book, fresh_probability,
-                        float(control["minModelEdgePct"]),
-                        float(self.cfg["risk"]["max_entry_price"]),
-                        market.tick_size, self.cfg["execution"])
                     exact_depth = self.data.executable_ask_depth(
                         market.yes_token if fresh_score.side == "YES"
                         else market.no_token, maximum_taker_price)
@@ -356,21 +393,16 @@ class Engine:
                         raise DefinitelyNotFilled(
                             "taker fallback cancelled: insufficient depth at capped price")
                     log.info(
-                        "TAKER RECHECK %s: side=%s confidence=%.1f edge=%.1f%% ask=%.3f cap=%.3f depth=$%.2f",
+                        "TAKER RECHECK %s: side=%s confidence=%.1f ask=%.3f cap=%.3f depth=$%.2f",
                         market.question, fresh_score.side,
-                        fresh_score.confidence, fresh_score.model_edge_pct,
+                        fresh_score.confidence,
                         fresh_selected_book.best_ask, maximum_taker_price,
                         exact_depth)
-                    return fresh_selected_book, fresh_probability
+                    return fresh_selected_book, maximum_taker_price
 
                 try:
                     fill = self.executor.buy(
                         market, score.side, score.size_usd, trade_book,
-                        # Taker fallback must preserve independent model edge;
-                        # order-book confidence cannot fund this probability.
-                        (score.yes_probability if score.side == "YES"
-                         else 100 - score.yes_probability) / 100,
-                        float(control["minModelEdgePct"]),
                         on_submitted=lambda order_id, status: self.store.update_pending_order(
                             market.condition_id, order_id, status),
                         refresh_for_taker=refresh_for_taker,
@@ -425,7 +457,8 @@ class Engine:
                 "evidence": evidence,
                 "strategy": {
                     "directional": True,
-                    "holdUntilResolution": True,
+                    "holdUntilResolution": False,
+                    "exitPolicy": "MAKER_ONLY_STAGED_PROFIT_LOCK",
                     "maxPositionsPerContract": 1,
                     "makerOrderType": "GTD_POST_ONLY",
                     "makerEffectiveLifetimeSec": int(
@@ -434,6 +467,15 @@ class Engine:
                         execution_cfg.get("taker_window_hours", 2)),
                     "takerFallback": "FOK",
                     "terminalFillRequired": "CONFIRMED",
+                    "confidenceModel": "OPTION_C",
+                    "minimumModelMispricingPct": float(
+                        self.cfg["risk"].get("min_model_mispricing_pct", 3)),
+                    "microstructureWeightPct": 25,
+                    "profitLockStages": ["+50% -> break-even",
+                                          "+100% -> +50%",
+                                          "+200% -> +100%"],
+                    "profitLockEntryRange": "$0.19-$0.449...",
+                    "profitLockExemptEntryRange": "$0.45-$0.93",
                 },
                 "redeemable": len(self.store.redeemable_positions()),
                 "pendingOrders": len(self.store.pending_orders()),
@@ -445,8 +487,43 @@ class Engine:
         except Exception:
             log.exception("failed to write dashboard status")
 
+    def manage_profit_locks(self) -> None:
+        """Run maker-only staged profit exits; never sell a losing position."""
+        profit_cfg = (self.cfg.get("execution") or {}).get("profit_lock") or {}
+        if not profit_cfg.get("enabled"):
+            return
+        for position in self.store.open_positions():
+            try:
+                entry = float(position["entry_price"])
+                if not profit_lock_eligible(entry, profit_cfg):
+                    continue
+                book = self.data.book(str(position["token_id"]))
+                peak = self.store.update_peak(
+                    int(position["position_id"]), max(entry, book.best_bid))
+                floor_price = profit_lock_floor(
+                    entry, peak, profit_cfg.get("stages") or [])
+                if floor_price is None or book.best_bid > floor_price + 1e-9:
+                    continue
+                shares = float(position["size_usd"]) / entry
+                try:
+                    fill = self.executor.sell_maker(
+                        str(position["token_id"]), shares, book, floor_price,
+                        str(position["tick_size"]), bool(position["neg_risk"]))
+                except DefinitelyNotFilled as exc:
+                    log.info("MAKER PROFIT EXIT UNFILLED %s floor=%.3f: %s",
+                             position["question"], floor_price, exc)
+                    continue
+                pnl = self.store.close_position(
+                    int(position["position_id"]), fill.price,
+                    fill.order_id, fill.shares)
+                log.warning("MAKER PROFIT EXIT %s floor=%.3f fill=%.3f pnl=$%.2f",
+                            position["question"], floor_price, fill.price, pnl)
+            except Exception:
+                log.exception("profit-lock management failed: %s",
+                              position["condition_id"])
+
     def reconcile_positions(self) -> None:
-        """Hold every trade to resolution and reconcile it from Polymarket."""
+        """Reconcile positions that remain open through market resolution."""
         positions = self.store.open_positions()
         pending = self.store.pending_orders()
         if not positions and not pending:

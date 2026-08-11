@@ -8,26 +8,29 @@ with the weather bot.
 
 | Role | Component | Relative weight | Method |
 |---|---|---:|---|
-| Probability | Context-matched historical mentions | 35 | Beta-smoothed hit rate from official GovInfo presidential transcripts, with resolved Gamma markets as fallback |
-| Probability | Market prior | 14 | Current executable-book midpoint |
-| Confidence confirmation | Order-book imbalance | bounded | Three consecutive samples, capped at ±5 confidence points |
-| Timing | Momentum | 14 | Selected outcome's recent price direction |
-| Hard gate | Pricing edge | 6 percentage points | Model probability versus executable ask |
+| Confidence | Context-matched historical mentions | 30% | Beta-smoothed resolved mention rate |
+| Confidence | Event/context relevance | 20% | Exact-context evidence coverage or calibrated YouTube context |
+| Confidence | Market prior | 15% | Current selected-outcome midpoint |
+| Confidence | Live microstructure | 25% | WOBI, executed flow, delta OBI, persistence, and microprice |
+| Confidence | Momentum | 10% | Selected outcome's recent price direction |
+| Hard gate | Model mispricing | 3 points | Independent mention probability versus actual order price |
 
-The probability components are normalized into a YES probability. It buys YES
-when confidence is 65–100, or NO when inverted confidence is 65–100, only when
-timing is at least 45 and executable model edge is at least six percentage
-points. Scores in the middle do not trade.
+The independent historical/context model selects YES or NO. Final Option C
+confidence must be 65–93, while the independent model must exceed the actual
+maker price or worst FOK price by at least three points. Scores in the middle,
+microstructure windows without at least 20 seconds of persistent snapshots and
+executed flow, and absorption signals do not trade.
 
 | Tier | Confidence | Position |
 |---|---:|---:|
 | C | 65–<80 | $3 |
 | B | 80–<90 | $4 |
-| A | 90–100 | $5 |
+| A | 90–93 | $5 |
 
 The authenticated dashboard may tighten Tier C's effective minimum up to 90,
-but can never lower it below 65. It can also tighten model edge, timing, and
-the known-event window, or pause new entries. Resolution reconciliation remains
+but can never lower it below 65. Confidence above 93 is explicitly rejected.
+The dashboard can also tighten timing and the known-event
+window, or pause new entries. Resolution reconciliation remains
 active while entries are paused.
 
 Historical data is segmented by context (`speech`, `debate`,
@@ -73,15 +76,21 @@ Liquidity and volume are execution-capacity gates only.
 - Five total open positions and one lifetime entry per condition
 - One entry per normalized subject/phrase per UTC day
 - Liquidity, spread, entry-price, and time gates
-- Minimum six-percentage-point modeled edge over the executable ask
-- Minimum timing score of 45
-- At least $200 liquidity and $200 traded volume (not confidence inputs)
-- Entry prices restricted to $0.16–$0.93
-- Entries require a known start no more than eight hours away
-- Post-only GTC maker order first; cancel then FAK taker fallback after 20 seconds
+- Minimum three-point independent model mispricing over the actual order price
+- Option C microstructure must be live for 20 seconds with executed-flow data
+- Aggressive flow without favorable price response triggers an absorption veto
+- Configurable timing score (currently zero)
+- Liquidity and volume are capacity checks only (currently disabled)
+- Entry prices restricted to $0.19–$0.93
+- Entries require a known start no more than 24 hours away
+- Post-only GTD maker order first; cancel then FOK taker fallback inside two hours
 - Taker fallback slippage dynamically bounded between 1% and 3%
-- No stop-loss, take-profit, trailing-stop, or pre-resolution exit
-- Hold through resolution and reconcile resolved/redeemable wallet positions
+- No stop-loss and no taker exit
+- Maker-only staged profit lock: +50% arms break-even, +100% locks +50%,
+  and +200% locks +100%; an unfilled maker exit may miss its floor. This applies
+  only when the entry price is below $0.45
+- Entries from $0.45 through $0.93 never use the profit lock and remain held
+  through resolution
 - `state/HALT` kill switch
 - SQLite state and JSONL journal
 

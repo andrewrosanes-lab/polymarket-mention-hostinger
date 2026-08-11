@@ -4,7 +4,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from math import floor
+from math import ceil, floor
 
 from .models import BookSignal, Market
 
@@ -31,19 +31,52 @@ def taker_window_open(market: Market, execution_cfg: dict,
     return hours <= float(execution_cfg.get("taker_window_hours", 2))
 
 
-def capped_taker_price(book: BookSignal, model_probability: float,
-                       minimum_edge_pct: float, maximum_entry_price: float,
+def capped_taker_price(book: BookSignal, maximum_entry_price: float,
                        tick_size: str, execution_cfg: dict) -> float:
-    """Return a tick-valid cap preserving slippage, model edge, and price limits."""
+    """Return a tick-valid cap preserving slippage and the entry-price limit."""
     slippage = taker_slippage_bps(book, execution_cfg) / 10_000
     raw_cap = min(
         float(maximum_entry_price),
         book.best_ask * (1 + slippage),
-        float(model_probability) - float(minimum_edge_pct) / 100,
     )
     tick = float(tick_size)
     decimals = len(tick_size.partition(".")[2].rstrip("0"))
     return round(max(0.0, floor((raw_cap + 1e-12) / tick) * tick), decimals)
+
+
+def profit_lock_floor(entry_price: float, peak_price: float,
+                      stages: list[dict]) -> float | None:
+    """Return the highest armed no-loss floor, or None before a 50% gain."""
+    entry = float(entry_price)
+    peak = float(peak_price)
+    if not 0 < entry < 1 or peak < entry:
+        return None
+    peak_gain = (peak / entry - 1) * 100
+    armed = [float(stage["lock_gain_pct"]) for stage in stages
+             if peak_gain + 1e-9 >= float(stage["trigger_gain_pct"])]
+    if not armed:
+        return None
+    return min(.99, entry * (1 + max(armed) / 100))
+
+
+def profit_lock_eligible(entry_price: float, profit_cfg: dict) -> bool:
+    """Apply staged exits only to low-price entries below the configured cap."""
+    return (bool(profit_cfg.get("enabled"))
+            and float(entry_price) < float(
+                profit_cfg.get("max_entry_price_exclusive", .45)))
+
+
+def maker_sell_price(book: BookSignal, minimum_price: float,
+                     tick_size: str) -> float:
+    """Choose a post-only sell price that never falls below the armed floor."""
+    tick = float(tick_size)
+    raw = max(float(minimum_price), book.best_bid + tick)
+    steps = ceil((raw - 1e-12) / tick)
+    decimals = len(tick_size.partition(".")[2].rstrip("0"))
+    price = round(steps * tick, decimals)
+    if price > .99 or price <= book.best_bid:
+        raise DefinitelyNotFilled("no valid post-only sell price above the bid")
+    return price
 
 
 def _response_fill(result: dict, side: str, fallback_price: float) -> Fill:
@@ -66,9 +99,7 @@ class PaperExecutor:
     def __init__(self, cfg: dict): self.cfg = cfg
 
     def buy(self, market: Market, side: str, usd: float, book: BookSignal,
-            model_probability: float | None = None,
-            minimum_edge_pct: float = 0.0, on_submitted=None,
-            refresh_for_taker=None) -> Fill:
+            on_submitted=None, refresh_for_taker=None) -> Fill:
         price = maker_price(book, market.tick_size,
                             self.cfg["execution"]["price_buffer_ticks"])
         return Fill("paper-maker", price, usd, usd / price)
@@ -78,6 +109,11 @@ class PaperExecutor:
         slip = self.cfg["execution"]["paper_slippage_bps"] / 10_000
         fill_price = max(0.01, price * (1 - slip))
         return Fill("paper-close", fill_price, shares * fill_price, shares)
+
+    def sell_maker(self, token_id: str, shares: float, book: BookSignal,
+                   minimum_price: float, tick_size: str, neg_risk: bool) -> Fill:
+        price = maker_sell_price(book, minimum_price, tick_size)
+        return Fill("paper-maker-close", price, shares * price, shares)
 
 
 class LiveExecutor:
@@ -144,9 +180,7 @@ class LiveExecutor:
         self._wait_for_confirmation(list(trade_ids))
 
     def buy(self, market: Market, side: str, usd: float, book: BookSignal,
-            model_probability: float | None = None,
-            minimum_edge_pct: float = 0.0, on_submitted=None,
-            refresh_for_taker=None) -> Fill:
+            on_submitted=None, refresh_for_taker=None) -> Fill:
         token = market.yes_token if side == "YES" else market.no_token
         execution_cfg = self.cfg["execution"]
         price = maker_price(book, market.tick_size,
@@ -199,16 +233,21 @@ class LiveExecutor:
                 "maker expired outside two-hour taker window")
         if refresh_for_taker is None:
             raise DefinitelyNotFilled("fresh taker re-evaluation unavailable")
-        book, model_probability = refresh_for_taker()
+        refreshed = refresh_for_taker()
+        if isinstance(refreshed, tuple):
+            book, strategy_cap = refreshed
+        else:
+            book, strategy_cap = refreshed, float(
+                self.cfg["risk"]["max_entry_price"])
         if book.ask_depth + 1e-9 < usd:
             raise DefinitelyNotFilled("taker fallback lacks full displayed ask depth")
         max_price = capped_taker_price(
-            book, float(model_probability), minimum_edge_pct,
-            float(self.cfg["risk"]["max_entry_price"]), market.tick_size,
-            execution_cfg)
+            book, min(float(self.cfg["risk"]["max_entry_price"]),
+                      float(strategy_cap)),
+            market.tick_size, execution_cfg)
         if max_price + 1e-9 < book.best_ask:
             raise DefinitelyNotFilled(
-                "taker fallback cancelled: slippage erased the required model edge")
+                "taker fallback cancelled: ask exceeds the permitted slippage cap")
         taker = self.client.create_and_post_market_order(
             order_args=self.MarketOrderArgs(token_id=token, amount=usd,
                 side=self.Side.BUY, price=max_price, order_type=self.OrderType.FOK),
@@ -237,6 +276,45 @@ class LiveExecutor:
             order_type=self.OrderType.FAK,
         )
         return _response_fill(result, "SELL", price)
+
+    def sell_maker(self, token_id: str, shares: float, book: BookSignal,
+                   minimum_price: float, tick_size: str, neg_risk: bool) -> Fill:
+        """Attempt a GTD post-only profit exit; never cross or use a taker."""
+        profit_cfg = self.cfg["execution"]["profit_lock"]
+        price = maker_sell_price(book, minimum_price, tick_size)
+        lifetime = int(profit_cfg.get("maker_timeout_sec", 45))
+        expiration = int(time.time()) + 60 + lifetime
+        result = self.client.create_and_post_order(
+            order_args=self.OrderArgs(token_id=token_id, price=price, size=shares,
+                side=self.Side.SELL, expiration=expiration),
+            options=self.Options(tick_size=tick_size, neg_risk=neg_risk),
+            order_type=self.OrderType.GTD,
+            post_only=True,
+        )
+        order_id = result.get("orderID") if isinstance(result, dict) else None
+        status = str(result.get("status") or "") if isinstance(result, dict) else ""
+        if status.lower() == "matched":
+            self._confirm_response(result)
+            return _response_fill(result, "SELL", price)
+        if not order_id:
+            raise DefinitelyNotFilled(f"maker profit exit rejected: {result}")
+
+        deadline = time.monotonic() + lifetime
+        while time.monotonic() < deadline:
+            time.sleep(self.cfg["execution"]["maker_poll_sec"])
+            order = self.client.get_order(order_id)
+            matched = float(order.get("size_matched") or 0)
+            if matched >= shares * .999:
+                self._wait_for_confirmation(order.get("associate_trades") or [])
+                return Fill(order_id, price, matched * price, matched)
+
+        self.client.cancel_order(self.OrderPayload(orderID=order_id))
+        order = self.client.get_order(order_id)
+        matched = float(order.get("size_matched") or 0)
+        if matched > 0:
+            self._wait_for_confirmation(order.get("associate_trades") or [])
+            return Fill(order_id, price, matched * price, matched)
+        raise DefinitelyNotFilled("maker profit exit expired unfilled; no taker used")
 
 
 def build(cfg: dict):

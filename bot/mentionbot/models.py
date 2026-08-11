@@ -54,3 +54,22 @@ class Score:
     book_confirmation: float = 50.0
     book_adjustment: float = 0.0
     book_samples: int = 0
+    independent_probability: float = 50.0
+    context_confidence: float = 50.0
+    microstructure_ready: bool = False
+    absorption: bool = False
+
+
+@dataclass(frozen=True)
+class MicrostructureSignal:
+    score: float = 50.0
+    wobi: float = 0.0
+    trade_flow: float = 0.0
+    delta_obi: float = 0.0
+    persistence: float = 0.0
+    microprice_score: float = 50.0
+    samples: int = 0
+    trade_samples: int = 0
+    age_seconds: float = 0.0
+    absorption: bool = False
+    ready: bool = False
