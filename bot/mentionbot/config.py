@@ -42,6 +42,24 @@ def _validate(cfg: dict) -> None:
     maker_timeout = float(execution.get("maker_timeout_sec", 0))
     if not 30 <= maker_timeout <= 60:
         raise ValueError("maker_timeout_sec must remain between 30 and 60 seconds")
+    option_c = cfg.get("option_c_confidence_weights") or {}
+    required_option_c = {"historical_mentions", "event_context", "market_prior",
+                         "microstructure", "momentum"}
+    if set(option_c) != required_option_c:
+        raise ValueError("Option C confidence weights are incomplete")
+    if abs(sum(float(value) for value in option_c.values()) - 1.0) > 1e-9:
+        raise ValueError("Option C confidence weights must sum to 1")
+    if float(risk.get("min_model_mispricing_pct", 0)) != 3:
+        raise ValueError("Option C requires exactly three points of model mispricing")
+    microstructure = cfg.get("microstructure") or {}
+    if not microstructure.get("enabled", False):
+        raise ValueError("Option C requires live microstructure")
+    if float(microstructure.get("minimum_persistence_sec", 0)) < 20:
+        raise ValueError("Option C requires at least 20 seconds of persistence")
+    if int(microstructure.get("minimum_snapshots", 0)) < 3:
+        raise ValueError("Option C requires at least three book snapshots")
+    if int(microstructure.get("minimum_trades", 0)) < 1:
+        raise ValueError("Option C requires executed-flow evidence")
     youtube = cfg.get("youtube_history") or {}
     if youtube.get("option_c_armed"):
         if not youtube.get("shadow_only_until_calibrated", False):
