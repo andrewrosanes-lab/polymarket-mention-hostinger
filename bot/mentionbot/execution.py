@@ -193,11 +193,17 @@ class LiveExecutor:
                 "maker expired outside two-hour taker window")
         if refresh_for_taker is None:
             raise DefinitelyNotFilled("fresh taker re-evaluation unavailable")
-        book = refresh_for_taker()
+        refreshed = refresh_for_taker()
+        if isinstance(refreshed, tuple):
+            book, strategy_cap = refreshed
+        else:
+            book, strategy_cap = refreshed, float(
+                self.cfg["risk"]["max_entry_price"])
         if book.ask_depth + 1e-9 < usd:
             raise DefinitelyNotFilled("taker fallback lacks full displayed ask depth")
         max_price = capped_taker_price(
-            book, float(self.cfg["risk"]["max_entry_price"]),
+            book, min(float(self.cfg["risk"]["max_entry_price"]),
+                      float(strategy_cap)),
             market.tick_size, execution_cfg)
         if max_price + 1e-9 < book.best_ask:
             raise DefinitelyNotFilled(
