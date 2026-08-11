@@ -84,8 +84,10 @@ Liquidity and volume are execution-capacity gates only.
 - Entries require a known start no more than 24 hours away
 - Post-only GTD maker order first; cancel then FOK taker fallback inside two hours
 - Taker fallback slippage dynamically bounded between 1% and 3%
-- No stop-loss, take-profit, trailing-stop, or pre-resolution exit
-- Hold through resolution and reconcile resolved/redeemable wallet positions
+- No stop-loss and no taker exit
+- Maker-only staged profit lock: +50% arms break-even, +100% locks +50%,
+  and +200% locks +100%; an unfilled maker exit may miss its floor
+- Positions not closed by the profit lock remain held through resolution
 - `state/HALT` kill switch
 - SQLite state and JSONL journal
 
