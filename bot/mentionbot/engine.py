@@ -103,7 +103,6 @@ class Engine:
         if len(self.store.open_positions()) >= r["max_open_positions"]: return False, "max positions"
         if market.liquidity < r["min_liquidity_usd"]: return False, "low liquidity"
         if market.volume < r["min_volume_usd"]: return False, "low traded volume"
-        if book.spread_pct > r["max_spread_pct"]: return False, "wide spread"
         min_timing = float(control["minTimingScore"])
         min_edge = float(control["minModelEdgePct"])
         if score.timing_score < min_timing:
