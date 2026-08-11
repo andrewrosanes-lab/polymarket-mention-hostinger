@@ -87,8 +87,10 @@ Liquidity and volume are execution-capacity gates only.
 - Taker fallback slippage dynamically bounded between 1% and 3%
 - No stop-loss and no taker exit
 - Maker-only staged profit lock: +50% arms break-even, +100% locks +50%,
-  and +200% locks +100%; an unfilled maker exit may miss its floor
-- Positions not closed by the profit lock remain held through resolution
+  and +200% locks +100%; an unfilled maker exit may miss its floor. This applies
+  only when the entry price is below $0.45
+- Entries from $0.45 through $0.93 never use the profit lock and remain held
+  through resolution
 - `state/HALT` kill switch
 - SQLite state and JSONL journal
 
