@@ -9,10 +9,11 @@ from mentionbot.engine import Engine
 from mentionbot.execution import (DefinitelyNotFilled, LiveExecutor,
                                   _response_fill, capped_taker_price,
                                   taker_window_open)
-from mentionbot.models import BookSignal, Market, Score
+from mentionbot.microstructure import calculate_signal
+from mentionbot.models import BookSignal, Market, MicrostructureSignal, Score
 from mentionbot.market import PolymarketData
 from mentionbot.news import NewsScorer
-from mentionbot.scoring import combine
+from mentionbot.scoring import combine, independent_probability
 from mentionbot.storage import Store
 from mentionbot.transcript_history import (count_phrase, market_history_shape,
                                            parse_govinfo_transcript)
@@ -54,6 +55,52 @@ def test_taker_cap_uses_slippage_and_absolute_price_limits_only():
     assert capped_taker_price(book, .93, "0.01", cfg) == .41
     expensive = BookSignal(50, .92, .93, 2, 100, 100)
     assert capped_taker_price(expensive, .93, "0.01", cfg) == .93
+
+
+def test_option_c_microstructure_composite_requires_live_persistence_and_flow():
+    samples = [
+        (0.0, .20, .50, 60),
+        (10.0, .30, .51, 65),
+        (21.0, .40, .52, 70),
+    ]
+    signal = calculate_signal(samples, [(15.0, 8.0, .51), (20.0, 2.0, .52)])
+    assert signal.ready is True
+    assert signal.wobi == .40 and signal.delta_obi == .20
+    assert signal.trade_flow == 1 and signal.persistence == 1
+    assert signal.absorption is False and signal.score > 75
+    assert calculate_signal(samples[:2], [(5.0, 1.0, .50)]).ready is False
+
+
+def test_option_c_absorption_veto_detects_buying_without_price_response():
+    samples = [(0.0, .30, .50, 60), (10.0, .35, .50, 60),
+               (21.0, .40, .50, 60)]
+    signal = calculate_signal(samples, [(10.0, 5.0, .50), (20.0, 5.0, .50)])
+    assert signal.ready and signal.absorption
+
+
+def test_option_c_weights_sum_to_confidence_without_changing_direction():
+    cfg = {
+        "probability_weights": {"historical_context": .35, "market_prior": .14},
+        "timing_weights": {"order_book_imbalance": .20, "momentum": .14},
+        "book_confidence": {},
+        "option_c_confidence_weights": {
+            "historical_mentions": .30, "event_context": .20,
+            "market_prior": .15, "microstructure": .25, "momentum": .10,
+        },
+        "tiers": [{"name": "C", "min_confidence": 65,
+                   "max_confidence": 80, "size_usd": 3}],
+    }
+    market = Market("c", "q", "e", "s", "es", None,
+        datetime.now(timezone.utc) + timedelta(hours=2), "y", "n", .5, .5,
+        0, 0, False, "0.01", "Trump", "word", "speech")
+    yes_book = BookSignal(90, .39, .40, 2, 100, 100)
+    no_book = BookSignal(10, .59, .60, 2, 100, 100)
+    micro = MicrostructureSignal(score=90, ready=True, samples=5)
+    score = combine(market, yes_book, no_book, 70, 60, 80, cfg,
+                    "exact phrase/context", 12, microstructure=micro)
+    assert independent_probability(70, 12) == 70
+    assert score.side == "YES" and score.independent_probability == 70
+    assert score.confidence == 80.5
 
 
 def test_unfilled_maker_outside_two_hours_never_calls_taker(monkeypatch):
@@ -761,7 +808,7 @@ def test_risk_does_not_reject_wide_spread():
     assert engine.risk_ok(market, score, book) == (True, "ok")
 
 
-def test_model_edge_is_diagnostic_and_never_blocks_entry():
+def test_option_c_requires_three_point_independent_mispricing():
     engine = Engine.__new__(Engine)
     engine.cfg = {"risk": {"kill_switch_file": "/never",
         "max_open_positions": 5, "min_liquidity_usd": 0,
@@ -774,11 +821,15 @@ def test_model_edge_is_diagnostic_and_never_blocks_entry():
     market = Market("c", "q", "e", "s", "es", None,
         datetime.now(timezone.utc) + timedelta(hours=3), "y", "n", .5, .5,
         0, 0, False, "0.01", "Trump", "word", "speech")
-    # Confidence is qualified even though the displayed price comparison is
-    # negative. Price, depth, timing, and entry locks still apply normally.
-    score = Score(75, 75, "YES", "C", 3, 50, 50, 50, 0, -20, "")
-    book = BookSignal(50, .89, .90, 2, 100, 100)
-    assert engine.risk_ok(market, score, book) == (True, "ok")
+    rejected = Score(75, 75, "YES", "C", 3, 50, 50, 50, 0, -20, "",
+                     independent_probability=75)
+    expensive = BookSignal(50, .89, .90, 2, 100, 100)
+    assert engine.risk_ok(market, rejected, expensive) == (
+        False, "independent model mispricing below 3%")
+    accepted = Score(75, 75, "YES", "C", 3, 50, 50, 50, 0, 5, "",
+                     independent_probability=75)
+    cheap = BookSignal(50, .69, .70, 2, 100, 100)
+    assert engine.risk_ok(market, accepted, cheap) == (True, "ok")
 
 
 def test_discovery_prioritizes_tradeable_candidates_before_outside_window():
