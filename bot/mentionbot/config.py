@@ -44,6 +44,21 @@ def _validate(cfg: dict) -> None:
     maker_timeout = float(execution.get("maker_timeout_sec", 0))
     if not 30 <= maker_timeout <= 60:
         raise ValueError("maker_timeout_sec must remain between 30 and 60 seconds")
+    profit_lock = execution.get("profit_lock") or {}
+    if not profit_lock.get("enabled") or not profit_lock.get("maker_only"):
+        raise ValueError("staged profit protection must remain maker-only")
+    stages = [
+        (float(item.get("trigger_gain_pct", -1)),
+         float(item.get("lock_gain_pct", -1)))
+        for item in profit_lock.get("stages") or []
+    ]
+    if stages != [(50.0, 0.0), (100.0, 50.0), (200.0, 100.0)]:
+        raise ValueError("profit-lock stages must remain 50/0, 100/50, 200/100")
+    if any(lock < 0 or lock >= trigger for trigger, lock in stages):
+        raise ValueError("profit locks cannot create a loss exit")
+    exit_timeout = float(profit_lock.get("maker_timeout_sec", 0))
+    if not 30 <= exit_timeout <= 60:
+        raise ValueError("profit-lock maker timeout must be 30 to 60 seconds")
     option_c = cfg.get("option_c_confidence_weights") or {}
     required_option_c = {"historical_mentions", "event_context", "market_prior",
                          "microstructure", "momentum"}
