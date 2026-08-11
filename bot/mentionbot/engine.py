@@ -58,16 +58,12 @@ class Engine:
             control = {key: payload.get(key, default)
                        for key, default in defaults.items()}
             limits = {
-                "minimumConfidence": (70, 90),
+                "minimumConfidence": (65, 90),
                 "minTimingScore": (0, 90),
                 "maxHoursBeforeEvent": (1, 24),
             }
             for key, (lower, upper) in limits.items():
                 value = float(control[key])
-                # One-time migration for the previously supported floor. A
-                # genuinely malformed value still fails closed below.
-                if key == "minimumConfidence" and value == 65:
-                    value = 70
                 if not lower <= value <= upper:
                     raise ValueError(f"{key} outside safe range")
                 control[key] = value
@@ -268,8 +264,12 @@ class Engine:
                 log.info("%s | %s %.1f | %s", market.question, score.side, score.confidence, score.explanation)
                 trade_book = book if score.side == "YES" else no_book
                 minimum_confidence = float(control["minimumConfidence"])
+                maximum_confidence = max(float(tier["max_confidence"])
+                                         for tier in self.cfg["tiers"])
                 if control["paused"]:
                     ok, reason = False, "new entries paused from dashboard"
+                elif score.confidence > maximum_confidence:
+                    ok, reason = False, f"confidence above {maximum_confidence:g}%"
                 elif score.confidence < minimum_confidence or not score.tier:
                     ok, reason = False, f"confidence below {minimum_confidence:g}%"
                 else:
@@ -367,6 +367,7 @@ class Engine:
                         raise DefinitelyNotFilled(
                             "taker fallback cancelled: model direction changed")
                     if (fresh_score.confidence < minimum_confidence
+                            or fresh_score.confidence > maximum_confidence
                             or not fresh_score.tier
                             or fresh_score.size_usd < score.size_usd):
                         raise DefinitelyNotFilled(
