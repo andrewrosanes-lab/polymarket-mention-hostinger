@@ -42,8 +42,9 @@ Each condition can be entered only once for its lifetime. A normalized
 subject/phrase can be entered only once per UTC day. A maker-only staged profit
 lock arms break-even after +50%, +50% profit after +100%, and +100% profit after
 +200%. There is no loss exit or taker fallback; an unfilled maker can miss the
-floor. Remaining positions are reconciled through resolution and flagged when
-onchain redemption is required.
+floor. It applies only to entry prices below $0.45. Trades entered from $0.45
+through $0.93 have no profit lock and remain held through resolution. Remaining
+positions are reconciled and flagged when onchain redemption is required.
 
 ## Authenticated dashboard controls
 
