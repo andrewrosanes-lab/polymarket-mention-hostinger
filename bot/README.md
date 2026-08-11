@@ -12,12 +12,12 @@ with the weather bot.
 | Probability | Market prior | 14 | Current executable-book midpoint |
 | Confidence confirmation | Order-book imbalance | bounded | Three consecutive samples, capped at ±5 confidence points |
 | Timing | Momentum | 14 | Selected outcome's recent price direction |
-| Hard gate | Pricing edge | 6 percentage points | Model probability versus executable ask |
+| Diagnostic | Pricing edge | No minimum | Model probability versus executable ask; never gates or sizes a trade |
 
 The probability components are normalized into a YES probability. It buys YES
-when confidence is 65–100, or NO when inverted confidence is 65–100, only when
-timing is at least 45 and executable model edge is at least six percentage
-points. Scores in the middle do not trade.
+when confidence is 65–100, or NO when inverted confidence is 65–100, subject
+to the configured timing, price, depth, exposure, and entry-lock gates. Scores
+in the middle do not trade.
 
 | Tier | Confidence | Position |
 |---|---:|---:|
@@ -26,8 +26,8 @@ points. Scores in the middle do not trade.
 | A | 90–100 | $5 |
 
 The authenticated dashboard may tighten Tier C's effective minimum up to 90,
-but can never lower it below 65. It can also tighten model edge, timing, and
-the known-event window, or pause new entries. Resolution reconciliation remains
+but can never lower it below 65. It can also tighten timing and the known-event
+window, or pause new entries. Resolution reconciliation remains
 active while entries are paused.
 
 Historical data is segmented by context (`speech`, `debate`,
@@ -73,12 +73,12 @@ Liquidity and volume are execution-capacity gates only.
 - Five total open positions and one lifetime entry per condition
 - One entry per normalized subject/phrase per UTC day
 - Liquidity, spread, entry-price, and time gates
-- Minimum six-percentage-point modeled edge over the executable ask
-- Minimum timing score of 45
-- At least $200 liquidity and $200 traded volume (not confidence inputs)
+- Model edge is diagnostic only and is not an entry gate
+- Configurable timing score (currently zero)
+- Liquidity and volume are capacity checks only (currently disabled)
 - Entry prices restricted to $0.16–$0.93
-- Entries require a known start no more than eight hours away
-- Post-only GTC maker order first; cancel then FAK taker fallback after 20 seconds
+- Entries require a known start no more than 24 hours away
+- Post-only GTD maker order first; cancel then FOK taker fallback inside two hours
 - Taker fallback slippage dynamically bounded between 1% and 3%
 - No stop-loss, take-profit, trailing-stop, or pre-resolution exit
 - Hold through resolution and reconcile resolved/redeemable wallet positions
