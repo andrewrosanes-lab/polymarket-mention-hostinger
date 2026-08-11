@@ -12,8 +12,12 @@ def historical_score(hits: int, total: int) -> float:
 
 
 def tier_for(confidence: float, tiers: list[dict]) -> tuple[str | None, float]:
-    for tier in tiers:
-        upper_ok = confidence <= tier["max_confidence"] if tier["max_confidence"] == 100 else confidence < tier["max_confidence"]
+    for index, tier in enumerate(tiers):
+        # Adjacent tiers use an exclusive upper bound; the final configured
+        # ceiling is inclusive so exactly 93% remains tradeable.
+        upper_ok = (confidence <= tier["max_confidence"]
+                    if index == len(tiers) - 1
+                    else confidence < tier["max_confidence"])
         if confidence >= tier["min_confidence"] and upper_ok:
             return tier["name"], float(tier["size_usd"])
     return None, 0.0
