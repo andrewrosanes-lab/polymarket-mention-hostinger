@@ -31,15 +31,13 @@ def taker_window_open(market: Market, execution_cfg: dict,
     return hours <= float(execution_cfg.get("taker_window_hours", 2))
 
 
-def capped_taker_price(book: BookSignal, model_probability: float,
-                       minimum_edge_pct: float, maximum_entry_price: float,
+def capped_taker_price(book: BookSignal, maximum_entry_price: float,
                        tick_size: str, execution_cfg: dict) -> float:
-    """Return a tick-valid cap preserving slippage, model edge, and price limits."""
+    """Return a tick-valid cap preserving slippage and the entry-price limit."""
     slippage = taker_slippage_bps(book, execution_cfg) / 10_000
     raw_cap = min(
         float(maximum_entry_price),
         book.best_ask * (1 + slippage),
-        float(model_probability) - float(minimum_edge_pct) / 100,
     )
     tick = float(tick_size)
     decimals = len(tick_size.partition(".")[2].rstrip("0"))
@@ -66,9 +64,7 @@ class PaperExecutor:
     def __init__(self, cfg: dict): self.cfg = cfg
 
     def buy(self, market: Market, side: str, usd: float, book: BookSignal,
-            model_probability: float | None = None,
-            minimum_edge_pct: float = 0.0, on_submitted=None,
-            refresh_for_taker=None) -> Fill:
+            on_submitted=None, refresh_for_taker=None) -> Fill:
         price = maker_price(book, market.tick_size,
                             self.cfg["execution"]["price_buffer_ticks"])
         return Fill("paper-maker", price, usd, usd / price)
@@ -144,9 +140,7 @@ class LiveExecutor:
         self._wait_for_confirmation(list(trade_ids))
 
     def buy(self, market: Market, side: str, usd: float, book: BookSignal,
-            model_probability: float | None = None,
-            minimum_edge_pct: float = 0.0, on_submitted=None,
-            refresh_for_taker=None) -> Fill:
+            on_submitted=None, refresh_for_taker=None) -> Fill:
         token = market.yes_token if side == "YES" else market.no_token
         execution_cfg = self.cfg["execution"]
         price = maker_price(book, market.tick_size,
@@ -199,16 +193,15 @@ class LiveExecutor:
                 "maker expired outside two-hour taker window")
         if refresh_for_taker is None:
             raise DefinitelyNotFilled("fresh taker re-evaluation unavailable")
-        book, model_probability = refresh_for_taker()
+        book = refresh_for_taker()
         if book.ask_depth + 1e-9 < usd:
             raise DefinitelyNotFilled("taker fallback lacks full displayed ask depth")
         max_price = capped_taker_price(
-            book, float(model_probability), minimum_edge_pct,
-            float(self.cfg["risk"]["max_entry_price"]), market.tick_size,
-            execution_cfg)
+            book, float(self.cfg["risk"]["max_entry_price"]),
+            market.tick_size, execution_cfg)
         if max_price + 1e-9 < book.best_ask:
             raise DefinitelyNotFilled(
-                "taker fallback cancelled: slippage erased the required model edge")
+                "taker fallback cancelled: ask exceeds the permitted slippage cap")
         taker = self.client.create_and_post_market_order(
             order_args=self.MarketOrderArgs(token_id=token, amount=usd,
                 side=self.Side.BUY, price=max_price, order_type=self.OrderType.FOK),
