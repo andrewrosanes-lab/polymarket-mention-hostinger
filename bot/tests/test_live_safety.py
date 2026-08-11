@@ -12,7 +12,8 @@ from mentionbot.config import _validate
 from mentionbot.engine import Engine
 from mentionbot.execution import (DefinitelyNotFilled, LiveExecutor,
                                   _response_fill, capped_taker_price,
-                                  maker_sell_price, profit_lock_floor,
+                                  maker_sell_price, profit_lock_eligible,
+                                  profit_lock_floor,
                                   taker_window_open)
 from mentionbot.microstructure import calculate_signal
 from mentionbot.models import BookSignal, Market, MicrostructureSignal, Score
@@ -40,6 +41,7 @@ def test_production_option_c_limits_are_locked(monkeypatch):
     assert cfg["risk"]["min_entry_price"] == .19
     assert cfg["risk"]["max_entry_price"] == .93
     assert cfg["execution"]["profit_lock"]["maker_only"] is True
+    assert cfg["execution"]["profit_lock"]["max_entry_price_exclusive"] == .45
 
     too_cheap = deepcopy(cfg)
     too_cheap["risk"]["min_entry_price"] = .18
@@ -79,6 +81,14 @@ def test_staged_profit_floor_never_creates_a_loss_exit():
     assert profit_lock_floor(.20, .30, stages) == pytest.approx(.20)
     assert profit_lock_floor(.20, .40, stages) == pytest.approx(.30)
     assert profit_lock_floor(.20, .60, stages) == pytest.approx(.40)
+
+
+def test_profit_lock_exempts_entries_from_45_to_93_cents():
+    cfg = {"enabled": True, "max_entry_price_exclusive": .45}
+    assert profit_lock_eligible(.19, cfg) is True
+    assert profit_lock_eligible(.4499, cfg) is True
+    assert profit_lock_eligible(.45, cfg) is False
+    assert profit_lock_eligible(.93, cfg) is False
 
 
 def test_profit_exit_is_post_only_gtd_and_never_falls_back_to_taker():
