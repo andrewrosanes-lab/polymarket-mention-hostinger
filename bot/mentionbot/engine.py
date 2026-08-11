@@ -39,7 +39,6 @@ class Engine:
         return {
             "paused": False,
             "minimumConfidence": float(self.cfg["minimum_confidence"]),
-            "minModelEdgePct": float(risk["min_model_edge_pct"]),
             "minTimingScore": float(risk["min_timing_score"]),
             "maxHoursBeforeEvent": float(risk["max_hours_before_event"]),
         }
@@ -50,10 +49,12 @@ class Engine:
             if not self._control_path.exists():
                 return defaults
             payload = json.loads(self._control_path.read_text())
-            control = {**defaults, **payload}
+            # Copy only supported controls. This deliberately discards the
+            # retired minModelEdgePct field from existing state volumes.
+            control = {key: payload.get(key, default)
+                       for key, default in defaults.items()}
             limits = {
                 "minimumConfidence": (65, 90),
-                "minModelEdgePct": (6, 20),
                 "minTimingScore": (0, 90),
                 "maxHoursBeforeEvent": (1, 24),
             }
@@ -98,7 +99,6 @@ class Engine:
         r = self.cfg["risk"]
         control = control or getattr(self, "_runtime_control", {
             "minTimingScore": float(r["min_timing_score"]),
-            "minModelEdgePct": float(r["min_model_edge_pct"]),
             "maxHoursBeforeEvent": float(r["max_hours_before_event"]),
         })
         if os.path.exists(r["kill_switch_file"]): return False, "kill switch"
@@ -106,11 +106,8 @@ class Engine:
         if market.liquidity < r["min_liquidity_usd"]: return False, "low liquidity"
         if market.volume < r["min_volume_usd"]: return False, "low traded volume"
         min_timing = float(control["minTimingScore"])
-        min_edge = float(control["minModelEdgePct"])
         if score.timing_score < min_timing:
             return False, f"timing score below {min_timing:g}"
-        if score.model_edge_pct < min_edge:
-            return False, f"model edge below {min_edge:g}%"
         if market.event_start is None:
             if r["require_known_event_start"]: return False, "unknown event start"
         else:
@@ -341,12 +338,8 @@ class Engine:
                     if not allowed:
                         raise DefinitelyNotFilled(
                             f"taker fallback cancelled: {fresh_reason}")
-                    fresh_probability = (
-                        fresh_score.yes_probability if fresh_score.side == "YES"
-                        else 100 - fresh_score.yes_probability) / 100
                     maximum_taker_price = capped_taker_price(
-                        fresh_selected_book, fresh_probability,
-                        float(control["minModelEdgePct"]),
+                        fresh_selected_book,
                         float(self.cfg["risk"]["max_entry_price"]),
                         market.tick_size, self.cfg["execution"])
                     exact_depth = self.data.executable_ask_depth(
@@ -356,21 +349,16 @@ class Engine:
                         raise DefinitelyNotFilled(
                             "taker fallback cancelled: insufficient depth at capped price")
                     log.info(
-                        "TAKER RECHECK %s: side=%s confidence=%.1f edge=%.1f%% ask=%.3f cap=%.3f depth=$%.2f",
+                        "TAKER RECHECK %s: side=%s confidence=%.1f ask=%.3f cap=%.3f depth=$%.2f",
                         market.question, fresh_score.side,
-                        fresh_score.confidence, fresh_score.model_edge_pct,
+                        fresh_score.confidence,
                         fresh_selected_book.best_ask, maximum_taker_price,
                         exact_depth)
-                    return fresh_selected_book, fresh_probability
+                    return fresh_selected_book
 
                 try:
                     fill = self.executor.buy(
                         market, score.side, score.size_usd, trade_book,
-                        # Taker fallback must preserve independent model edge;
-                        # order-book confidence cannot fund this probability.
-                        (score.yes_probability if score.side == "YES"
-                         else 100 - score.yes_probability) / 100,
-                        float(control["minModelEdgePct"]),
                         on_submitted=lambda order_id, status: self.store.update_pending_order(
                             market.condition_id, order_id, status),
                         refresh_for_taker=refresh_for_taker,
