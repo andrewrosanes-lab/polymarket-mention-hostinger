@@ -36,7 +36,9 @@ prior, 25% live microstructure, and 10% momentum. The independent mention model
 chooses direction and must exceed the actual entry price by at least three
 percentage points. Live microstructure requires five-level weighted OBI,
 executed flow, delta OBI, persistence, and microprice; adverse absorption vetoes
-entry. Liquidity and volume remain execution-capacity inputs, never confidence.
+entry. Missing mention history and a warming microstructure window contribute
+neutral diagnostics rather than blocking entry. Liquidity and volume remain
+execution-capacity inputs, never confidence.
 
 Each condition can be entered only once for its lifetime. A normalized
 subject/phrase can be entered only once per UTC day. A maker-only staged profit
