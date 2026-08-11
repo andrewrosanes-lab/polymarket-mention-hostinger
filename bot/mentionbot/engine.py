@@ -58,12 +58,16 @@ class Engine:
             control = {key: payload.get(key, default)
                        for key, default in defaults.items()}
             limits = {
-                "minimumConfidence": (65, 90),
+                "minimumConfidence": (70, 90),
                 "minTimingScore": (0, 90),
                 "maxHoursBeforeEvent": (1, 24),
             }
             for key, (lower, upper) in limits.items():
                 value = float(control[key])
+                # One-time migration for the previously supported floor. A
+                # genuinely malformed value still fails closed below.
+                if key == "minimumConfidence" and value == 65:
+                    value = 70
                 if not lower <= value <= upper:
                     raise ValueError(f"{key} outside safe range")
                 control[key] = value
