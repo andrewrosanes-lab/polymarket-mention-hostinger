@@ -71,18 +71,35 @@ class PolymarketData:
     def portfolio_positions(self, address: str, closed: bool = False) -> list[dict]:
         """Read current or closed wallet positions for resolution reconciliation."""
         endpoint = "closed-positions" if closed else "positions"
-        response = self.session.get(
-            f"{self.data_api}/{endpoint}",
-            params={"user": address, "limit": 500,
-                    "sizeThreshold": 0} if not closed else
-                   {"user": address, "limit": 500},
-            timeout=25,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, list):
-            raise ValueError(f"unexpected {endpoint} response")
-        return payload
+        if not closed:
+            response = self.session.get(
+                f"{self.data_api}/{endpoint}",
+                params={"user": address, "limit": 500, "sizeThreshold": 0},
+                timeout=25,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise ValueError(f"unexpected {endpoint} response")
+            return payload
+
+        # The documented closed-position page size is 50.  Pagination avoids
+        # relying on the API's current, undocumented acceptance of limit=500.
+        rows: list[dict] = []
+        for offset in range(0, 500, 50):
+            response = self.session.get(
+                f"{self.data_api}/{endpoint}",
+                params={"user": address, "limit": 50, "offset": offset},
+                timeout=25,
+            )
+            response.raise_for_status()
+            page = response.json()
+            if not isinstance(page, list):
+                raise ValueError(f"unexpected {endpoint} response")
+            rows.extend(page)
+            if len(page) < 50:
+                break
+        return rows
 
     def _validate_tags(self) -> None:
         if not self.cfg["discovery"].get("validate_tags", True):

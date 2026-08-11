@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -73,7 +74,11 @@ def _transcript_text(payload: dict) -> str:
 
 def _published_before_event(video: YouTubeVideo, market) -> bool:
     event_start = getattr(market, "event_start", None)
-    if event_start is None or not video.upload_date:
+    # Unknown publication time is not historical evidence.  Accepting it can
+    # leak the target episode itself (or a later upload) into a live forecast.
+    if not video.upload_date:
+        return False
+    if event_start is None:
         return True
     try:
         published = datetime.fromisoformat(video.upload_date.replace("Z", "+00:00"))
@@ -142,10 +147,20 @@ class SupadataYouTubeHistory:
             "text": "true",
             "mode": "native",
         })
-        if payload.get("jobId"):
-            log.info("Supadata transcript still processing; deferring video %s",
-                     video.video_id)
-            return ""
+        job_id = payload.get("jobId")
+        if job_id:
+            deadline = time.monotonic() + float(
+                self.cfg.get("job_poll_timeout_sec", 30))
+            interval = max(1.0, float(self.cfg.get("job_poll_interval_sec", 1)))
+            while time.monotonic() < deadline:
+                time.sleep(interval)
+                payload = self._get(f"/transcript/{job_id}", {})
+                if not payload.get("jobId") and payload.get("content") is not None:
+                    break
+            else:
+                log.info("Supadata transcript still processing; retrying video %s later",
+                         video.video_id)
+                return ""
         return _transcript_text(payload)
 
     def refresh(self, markets: list, store) -> tuple[int, int, int]:
@@ -172,15 +187,22 @@ class SupadataYouTubeHistory:
         max_events = max(1, int(self.cfg.get("max_events_per_refresh", 1)))
         max_videos = max(1, int(self.cfg.get("max_videos_per_event", 2)))
         videos_read = rows = mentions = 0
-        processed: list[tuple[str, list]] = []
+        attempted = False
+        refreshed: set[tuple[str, str]] = set()
         for query, targets in sorted(grouped.items())[:max_events]:
             try:
                 videos = self._search(query)[:max_videos]
             except (requests.RequestException, ValueError) as exc:
                 log.warning("Supadata YouTube search skipped %r: %s", query, exc)
                 continue
-            processed.append((query, targets))
+            attempted = True
             for video in videos:
+                eligible = [(market, refresh_key) for market, refresh_key in targets
+                            if _published_before_event(video, market)]
+                if not eligible:
+                    log.info("Supadata video excluded without verified pre-event date: %s",
+                             video.video_id)
+                    continue
                 try:
                     text = self._transcript(video)
                 except (requests.RequestException, ValueError) as exc:
@@ -192,22 +214,22 @@ class SupadataYouTubeHistory:
                 videos_read += 1
                 date = video.upload_date[:10] or datetime.now(
                     timezone.utc).date().isoformat()
-                for market, _ in targets:
-                    if not _published_before_event(video, market):
-                        continue
+                for market, refresh_key in eligible:
                     count = count_phrase(text, market.phrase)
                     rows += int(store.add_transcript_mention(
                         f"youtube:{video.video_id}", market.subject,
                         market.phrase, market.context, count, date, video.title,
                         video.url, source_kind=SOURCE_KIND))
                     mentions += count
+                    refreshed.add((market.subject, refresh_key))
 
-        for _, targets in processed:
-            for market, refresh_key in targets:
-                store.mark_transcript_refreshed(
-                    market.subject, refresh_key, videos_read,
-                    source_kind=SOURCE_KIND)
-        if processed:
+        # A target is put on its long refresh interval only after a dated,
+        # pre-event transcript was actually retrieved and counted.  Failed or
+        # asynchronous jobs become eligible again after the global daily budget.
+        for subject, refresh_key in refreshed:
+            store.mark_transcript_refreshed(
+                subject, refresh_key, videos_read, source_kind=SOURCE_KIND)
+        if attempted:
             store.mark_transcript_refreshed(
                 "__supadata__", "__global__", videos_read,
                 source_kind=SOURCE_KIND)
