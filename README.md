@@ -34,8 +34,8 @@ fallback. News and arbitrage are excluded from scoring and the dashboard.
 Historical context and the current market prior estimate mention probability.
 Persistent order-book pressure requires three samples and may adjust confidence
 by no more than five points. Liquidity and volume remain $200 hard execution
-gates but never add confidence. The executable ask must still leave at least
-six percentage points of model edge.
+gates but never add confidence. Model edge is displayed as a diagnostic only;
+it is not an entry requirement or a position-sizing input.
 
 Each condition can be entered only once for its lifetime. A normalized
 subject/phrase can be entered only once per UTC day. Positions are held through
@@ -45,8 +45,8 @@ data and flagged when onchain redemption is required.
 ## Authenticated dashboard controls
 
 The dashboard can tune a strict whitelist without exposing wallet credentials:
-minimum confidence (65–90), minimum model edge (6–20%), timing confirmation
-(45–90), known-event entry window (1–8 hours), and pause/resume for new entries.
+minimum confidence (65–90), timing confirmation (0–90), known-event entry
+window (1–24 hours), and pause/resume for new entries.
 Resolution reconciliation continues while entries are paused. Changes are validated twice: once by
 the dashboard API and again by the bot. Invalid control files fail closed by
 pausing new entries.
