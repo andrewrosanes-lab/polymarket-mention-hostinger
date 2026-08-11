@@ -91,7 +91,6 @@ risk:
   min_liquidity_usd: 0
   min_volume_usd: 0
   max_spread_pct: 100
-  min_model_edge_pct: 6
   min_timing_score: 0
   max_hours_before_event: 24
   require_known_event_start: true
