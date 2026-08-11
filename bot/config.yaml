@@ -5,7 +5,7 @@ allow_live_trading: true
 poll_interval_sec: 60
 max_markets_per_scan: 300
 max_candidates_per_cycle: 100
-minimum_confidence: 65
+minimum_confidence: 70
 
 probability_weights:
   historical_context: 0.35
@@ -95,7 +95,7 @@ youtube_history:
   timeout_sec: 30
 
 tiers:
-  - {name: C, min_confidence: 65, max_confidence: 80, size_usd: 3}
+  - {name: C, min_confidence: 70, max_confidence: 80, size_usd: 3}
   - {name: B, min_confidence: 80, max_confidence: 90, size_usd: 4}
   - {name: A, min_confidence: 90, max_confidence: 100, size_usd: 5}
 
@@ -103,7 +103,7 @@ risk:
   bankroll_usd: 100
   max_open_positions: 5
   max_entry_price: 0.93
-  min_entry_price: 0.16
+  min_entry_price: 0.19
   # Capacity remains a hard execution-safety gate, not a confidence input.
   min_liquidity_usd: 0
   min_volume_usd: 0
