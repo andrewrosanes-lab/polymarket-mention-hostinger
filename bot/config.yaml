@@ -154,6 +154,8 @@ execution:
   profit_lock:
     enabled: true
     maker_only: true
+    # Entry prices from $0.45 through $0.93 are exempt and remain held.
+    max_entry_price_exclusive: 0.45
     maker_timeout_sec: 45
     stages:
       - {trigger_gain_pct: 50, lock_gain_pct: 0}
