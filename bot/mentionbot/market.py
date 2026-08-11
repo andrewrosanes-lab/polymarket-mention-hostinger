@@ -306,6 +306,18 @@ class PolymarketData:
         spread = ((best_ask - best_bid) / mid * 100) if mid else 100
         return BookSignal(100 * imbalance, best_bid, best_ask, spread, bid_depth, ask_depth)
 
+    def executable_ask_depth(self, token_id: str, maximum_price: float) -> float:
+        """Return displayed dollar depth that a capped taker may actually reach."""
+        response = self.session.get(
+            f"{self.clob}/book", params={"token_id": token_id}, timeout=15)
+        response.raise_for_status()
+        raw = response.json()
+        return sum(
+            float(level["price"]) * float(level["size"])
+            for level in (raw.get("asks") or [])
+            if float(level["price"]) <= float(maximum_price) + 1e-12
+        )
+
     def momentum(self, token_id: str, current: float) -> float:
         try:
             raw = self.session.get(f"{self.clob}/prices-history",

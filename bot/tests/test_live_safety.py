@@ -6,7 +6,9 @@ import sqlite3
 import pytest
 
 from mentionbot.engine import Engine
-from mentionbot.execution import _response_fill
+from mentionbot.execution import (DefinitelyNotFilled, LiveExecutor,
+                                  _response_fill, capped_taker_price,
+                                  taker_window_open)
 from mentionbot.models import BookSignal, Market, Score
 from mentionbot.market import PolymarketData
 from mentionbot.news import NewsScorer
@@ -29,6 +31,186 @@ def test_confirmed_buy_and_sell_amounts():
     assert sell.price == .3 and sell.size_usd == 3
     with pytest.raises(RuntimeError):
         _response_fill({"status": "unmatched"}, "SELL", .5)
+
+
+def test_taker_window_is_time_aware():
+    now = datetime.now(timezone.utc)
+    cfg = {"taker_window_hours": 2}
+
+    def market(start):
+        return Market("c", "q", "e", "s", "es", start,
+            now + timedelta(hours=5), "y", "n", .5, .5,
+            0, 0, False, "0.01", "Trump", "word", "speech")
+
+    assert taker_window_open(market(now + timedelta(hours=3)), cfg, now) is False
+    assert taker_window_open(market(now + timedelta(hours=1)), cfg, now) is True
+    assert taker_window_open(market(now - timedelta(minutes=5)), cfg, now) is True
+    assert taker_window_open(market(None), cfg, now) is False
+
+
+def test_taker_cap_preserves_all_three_price_limits():
+    book = BookSignal(50, .39, .40, 20, 100, 100)
+    cfg = {"taker_min_slippage_bps": 100, "taker_max_slippage_bps": 300}
+    # Slippage cap is 0.412, model-edge cap is 0.44, absolute cap is 0.93.
+    assert capped_taker_price(book, .50, 6, .93, "0.01", cfg) == .41
+    # A weaker model makes the edge cap the strictest limit.
+    assert capped_taker_price(book, .465, 6, .93, "0.01", cfg) == .40
+
+
+def test_unfilled_maker_outside_two_hours_never_calls_taker(monkeypatch):
+    now = datetime.now(timezone.utc)
+    market = Market("c", "q", "e", "s", "es", now + timedelta(hours=3),
+        now + timedelta(hours=5), "y", "n", .5, .5,
+        0, 0, False, "0.01", "Trump", "word", "speech")
+    book = BookSignal(50, .39, .40, 2, 100, 100)
+    calls = {"maker": None, "taker": 0, "cancel": 0}
+
+    class Client:
+        def create_and_post_order(self, **kwargs):
+            calls["maker"] = kwargs
+            return {"success": True, "orderID": "maker", "status": "live"}
+        def get_order(self, order_id):
+            return {"size_matched": "0", "associate_trades": []}
+        def cancel_order(self, payload): calls["cancel"] += 1
+        def create_and_post_market_order(self, **kwargs):
+            calls["taker"] += 1
+            pytest.fail("taker must not run outside two hours")
+
+    executor = LiveExecutor.__new__(LiveExecutor)
+    executor.cfg = {"execution": {"price_buffer_ticks": 1,
+        "maker_timeout_sec": 0, "maker_poll_sec": 0,
+        "taker_window_hours": 2}, "risk": {"max_entry_price": .93}}
+    executor.client = Client()
+    executor.OrderArgs = lambda **kwargs: kwargs
+    executor.OrderPayload = lambda **kwargs: kwargs
+    executor.Options = lambda **kwargs: kwargs
+    executor.OrderType = type("OrderType", (), {"GTD": "GTD", "FOK": "FOK"})
+    executor.Side = type("Side", (), {"BUY": "BUY"})
+    monkeypatch.setattr("mentionbot.execution.time.time", lambda: 1000)
+
+    with pytest.raises(DefinitelyNotFilled, match="outside two-hour"):
+        executor.buy(market, "YES", 3, book, .60, 6,
+                     refresh_for_taker=lambda: pytest.fail("no refresh"))
+    assert calls["maker"]["order_type"] == "GTD"
+    assert calls["maker"]["order_args"]["expiration"] == 1060
+    assert calls["cancel"] == 1 and calls["taker"] == 0
+
+
+def test_partial_maker_fill_is_not_topped_up_with_taker():
+    now = datetime.now(timezone.utc)
+    market = Market("c", "q", "e", "s", "es", now + timedelta(hours=1),
+        now + timedelta(hours=5), "y", "n", .5, .5,
+        0, 0, False, "0.01", "Trump", "word", "speech")
+    book = BookSignal(50, .39, .40, 2, 100, 100)
+
+    class Client:
+        def create_and_post_order(self, **kwargs):
+            return {"success": True, "orderID": "maker", "status": "live"}
+        def get_order(self, order_id):
+            return {"size_matched": "2", "associate_trades": ["trade"]}
+        def cancel_order(self, payload): pass
+        def create_and_post_market_order(self, **kwargs):
+            pytest.fail("partial maker fill must never be topped up")
+
+    executor = LiveExecutor.__new__(LiveExecutor)
+    executor.cfg = {"execution": {"price_buffer_ticks": 1,
+        "maker_timeout_sec": 0, "maker_poll_sec": 0,
+        "taker_window_hours": 2}, "risk": {"max_entry_price": .93}}
+    executor.client = Client()
+    executor.OrderArgs = lambda **kwargs: kwargs
+    executor.OrderPayload = lambda **kwargs: kwargs
+    executor.Options = lambda **kwargs: kwargs
+    executor.OrderType = type("OrderType", (), {"GTD": "GTD", "FOK": "FOK"})
+    executor.Side = type("Side", (), {"BUY": "BUY"})
+    executor._wait_for_confirmation = lambda trade_ids: None
+    fill = executor.buy(market, "YES", 3, book, .60, 6,
+                        refresh_for_taker=lambda: pytest.fail("no refresh"))
+    assert fill.order_id == "maker" and fill.shares == 2
+
+
+def test_inside_two_hours_uses_refreshed_capped_fok():
+    now = datetime.now(timezone.utc)
+    market = Market("c", "q", "e", "s", "es", now + timedelta(hours=1),
+        now + timedelta(hours=5), "y", "n", .5, .5,
+        0, 0, False, "0.01", "Trump", "word", "speech")
+    original = BookSignal(50, .39, .40, 2, 100, 100)
+    refreshed = BookSignal(50, .40, .41, 2, 100, 100)
+    calls = {"taker": None, "confirmed": None}
+
+    class Client:
+        def create_and_post_order(self, **kwargs):
+            return {"success": True, "orderID": "maker", "status": "live"}
+        def get_order(self, order_id):
+            return {"size_matched": "0", "associate_trades": []}
+        def cancel_order(self, payload): pass
+        def create_and_post_market_order(self, **kwargs):
+            calls["taker"] = kwargs
+            return {"success": True, "orderID": "fok", "status": "matched",
+                    "makingAmount": "3", "takingAmount": "7.317073",
+                    "tradeIDs": ["trade"]}
+
+    executor = LiveExecutor.__new__(LiveExecutor)
+    executor.cfg = {"execution": {"price_buffer_ticks": 1,
+        "maker_timeout_sec": 0, "maker_poll_sec": 0,
+        "taker_window_hours": 2, "taker_min_slippage_bps": 100,
+        "taker_max_slippage_bps": 300}, "risk": {"max_entry_price": .93}}
+    executor.client = Client()
+    executor.OrderArgs = lambda **kwargs: kwargs
+    executor.MarketOrderArgs = lambda **kwargs: kwargs
+    executor.OrderPayload = lambda **kwargs: kwargs
+    executor.Options = lambda **kwargs: kwargs
+    executor.OrderType = type("OrderType", (), {"GTD": "GTD", "FOK": "FOK"})
+    executor.Side = type("Side", (), {"BUY": "BUY"})
+    executor._confirm_response = lambda result: calls.update(confirmed=result)
+    fill = executor.buy(market, "YES", 3, original, .60, 6,
+                        refresh_for_taker=lambda: (refreshed, .60))
+    assert calls["taker"]["order_type"] == "FOK"
+    assert calls["taker"]["order_args"]["order_type"] == "FOK"
+    assert calls["taker"]["order_args"]["price"] == .41
+    assert calls["confirmed"]["orderID"] == "fok"
+    assert round(fill.size_usd, 2) == 3
+
+
+def test_trade_finality_retries_transient_reads_until_confirmed(monkeypatch):
+    replies = iter((RuntimeError("temporary CLOB failure"),
+                    [{"id": "trade", "status": "MATCHED"}],
+                    [{"id": "trade", "status": "CONFIRMED"}]))
+
+    class Client:
+        def get_trades(self, *args, **kwargs):
+            reply = next(replies)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+    executor = LiveExecutor.__new__(LiveExecutor)
+    executor.cfg = {"execution": {
+        "trade_confirmation_timeout_sec": 45,
+        "trade_confirmation_poll_sec": 1,
+    }}
+    executor.client = Client()
+    executor.TradeParams = lambda **kwargs: kwargs
+    clock = iter((0, 1, 2, 3, 4, 5))
+    monkeypatch.setattr("mentionbot.execution.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("mentionbot.execution.time.sleep", lambda _: None)
+    executor._wait_for_confirmation(["trade"])
+
+
+def test_trade_finality_rejects_terminal_failure(monkeypatch):
+    class Client:
+        def get_trades(self, *args, **kwargs):
+            return [{"id": "trade", "status": "FAILED"}]
+
+    executor = LiveExecutor.__new__(LiveExecutor)
+    executor.cfg = {"execution": {
+        "trade_confirmation_timeout_sec": 45,
+        "trade_confirmation_poll_sec": 1,
+    }}
+    executor.client = Client()
+    executor.TradeParams = lambda **kwargs: kwargs
+    monkeypatch.setattr("mentionbot.execution.time.sleep", lambda _: None)
+    with pytest.raises(DefinitelyNotFilled, match="failed permanently"):
+        executor._wait_for_confirmation(["trade"])
 
 
 def test_position_metadata_survives_missing_discovery_market(tmp_path):
@@ -446,6 +628,23 @@ def test_closed_positions_use_documented_pagination():
         {"user": "0x" + "1" * 40, "limit": 50, "offset": 0},
         {"user": "0x" + "1" * 40, "limit": 50, "offset": 50},
     ]
+
+
+def test_executable_depth_counts_only_asks_within_taker_cap():
+    class Response:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"asks": [
+                {"price": ".40", "size": "5"},
+                {"price": ".41", "size": "10"},
+                {"price": ".42", "size": "100"},
+            ]}
+
+    data = PolymarketData.__new__(PolymarketData)
+    data.clob = "https://clob.polymarket.com"
+    data.session = type("Session", (), {
+        "get": lambda self, *args, **kwargs: Response()})()
+    assert data.executable_ask_depth("token", .41) == pytest.approx(6.1)
 
 
 def test_official_transcript_counts_only_president_and_overrides_gamma(tmp_path):

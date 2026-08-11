@@ -8,7 +8,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .execution import DefinitelyNotFilled, build
+from .execution import DefinitelyNotFilled, build, capped_taker_price
 from .market import PolymarketData
 from .scoring import combine, historical_score, probability_from_evidence
 from .storage import Store
@@ -92,7 +92,9 @@ class Engine:
         except Exception:
             log.exception("historical Gamma refresh failed; retaining existing history")
 
-    def risk_ok(self, market, score, book, control: dict | None = None) -> tuple[bool, str]:
+    def risk_ok(self, market, score, book, control: dict | None = None,
+                check_entry_lock: bool = True,
+                required_size_usd: float | None = None) -> tuple[bool, str]:
         r = self.cfg["risk"]
         control = control or getattr(self, "_runtime_control", {
             "minTimingScore": float(r["min_timing_score"]),
@@ -118,12 +120,15 @@ class Engine:
                 return False, f"more than {max_hours:g} hours before event"
         if not r["min_entry_price"] <= book.best_ask <= r["max_entry_price"]:
             return False, "executable entry price gate"
-        if book.ask_depth + 1e-9 < score.size_usd:
+        required_size = (score.size_usd if required_size_usd is None
+                         else float(required_size_usd))
+        if book.ask_depth + 1e-9 < required_size:
             return False, "insufficient executable ask depth"
-        entry_allowed, reason = self.store.entry_allowed(
-            market.condition_id, market.subject, market.phrase)
-        if not entry_allowed:
-            return False, reason
+        if check_entry_lock:
+            entry_allowed, reason = self.store.entry_allowed(
+                market.condition_id, market.subject, market.phrase)
+            if not entry_allowed:
+                return False, reason
         return True, "ok"
 
     def _remember_book(self, token_id: str, score: float) -> tuple[float, int]:
@@ -290,6 +295,74 @@ class Engine:
                     market.question, market.end_date.isoformat(),
                     market.tick_size, market.neg_risk, market.subject,
                     market.phrase)
+
+                def refresh_for_taker():
+                    """Rebuild the complete signal from a fresh executable book."""
+                    fresh_yes_book = self.data.book(market.yes_token)
+                    fresh_no_book = self.data.book(market.no_token)
+                    fresh_momentum = self.data.momentum(
+                        market.yes_token, market.yes_price)
+                    fresh_midpoint = (
+                        (fresh_yes_book.best_bid + fresh_yes_book.best_ask) / 2
+                        if fresh_yes_book.best_ask >= fresh_yes_book.best_bid
+                        else market.yes_price)
+                    fresh_prior = max(0, min(100, fresh_midpoint * 100))
+                    fresh_provisional = combine(
+                        market, fresh_yes_book, fresh_no_book, hist,
+                        fresh_prior, fresh_momentum, self.cfg, history_scope,
+                        total, youtube_history=active_youtube,
+                        youtube_samples=active_youtube_samples,
+                        probability_weights_override=active_weights)
+                    fresh_selected_book = (
+                        fresh_yes_book if fresh_provisional.side == "YES"
+                        else fresh_no_book)
+                    fresh_confirmation, fresh_samples = self._remember_book(
+                        market.yes_token if fresh_provisional.side == "YES"
+                        else market.no_token, fresh_selected_book.score)
+                    fresh_score = combine(
+                        market, fresh_yes_book, fresh_no_book, hist,
+                        fresh_prior, fresh_momentum, self.cfg, history_scope,
+                        total, fresh_confirmation, fresh_samples,
+                        youtube_history=active_youtube,
+                        youtube_samples=active_youtube_samples,
+                        probability_weights_override=active_weights)
+                    if fresh_score.side != score.side:
+                        raise DefinitelyNotFilled(
+                            "taker fallback cancelled: model direction changed")
+                    if (fresh_score.confidence < minimum_confidence
+                            or not fresh_score.tier
+                            or fresh_score.size_usd < score.size_usd):
+                        raise DefinitelyNotFilled(
+                            "taker fallback cancelled: refreshed confidence tier weakened")
+                    allowed, fresh_reason = self.risk_ok(
+                        market, fresh_score, fresh_selected_book, control,
+                        check_entry_lock=False,
+                        required_size_usd=score.size_usd)
+                    if not allowed:
+                        raise DefinitelyNotFilled(
+                            f"taker fallback cancelled: {fresh_reason}")
+                    fresh_probability = (
+                        fresh_score.yes_probability if fresh_score.side == "YES"
+                        else 100 - fresh_score.yes_probability) / 100
+                    maximum_taker_price = capped_taker_price(
+                        fresh_selected_book, fresh_probability,
+                        float(control["minModelEdgePct"]),
+                        float(self.cfg["risk"]["max_entry_price"]),
+                        market.tick_size, self.cfg["execution"])
+                    exact_depth = self.data.executable_ask_depth(
+                        market.yes_token if fresh_score.side == "YES"
+                        else market.no_token, maximum_taker_price)
+                    if exact_depth + 1e-9 < score.size_usd:
+                        raise DefinitelyNotFilled(
+                            "taker fallback cancelled: insufficient depth at capped price")
+                    log.info(
+                        "TAKER RECHECK %s: side=%s confidence=%.1f edge=%.1f%% ask=%.3f cap=%.3f depth=$%.2f",
+                        market.question, fresh_score.side,
+                        fresh_score.confidence, fresh_score.model_edge_pct,
+                        fresh_selected_book.best_ask, maximum_taker_price,
+                        exact_depth)
+                    return fresh_selected_book, fresh_probability
+
                 try:
                     fill = self.executor.buy(
                         market, score.side, score.size_usd, trade_book,
@@ -300,10 +373,12 @@ class Engine:
                         float(control["minModelEdgePct"]),
                         on_submitted=lambda order_id, status: self.store.update_pending_order(
                             market.condition_id, order_id, status),
+                        refresh_for_taker=refresh_for_taker,
                     )
-                except DefinitelyNotFilled:
+                except DefinitelyNotFilled as exc:
                     self.store.release_order_reservation(market.condition_id)
-                    raise
+                    log.info("NO FILL %s: %s", market.question, exc)
+                    continue
                 except Exception as exc:
                     # Unknown network/order outcomes remain locked.  A later
                     # wallet reconciliation can adopt a real fill; the next
@@ -329,6 +404,7 @@ class Engine:
             path = Path(self.cfg["paths"]["status"])
             path.parent.mkdir(parents=True, exist_ok=True)
             evidence = self.store.evidence_summary()
+            execution_cfg = self.cfg.get("execution") or {}
             covered = sum(int(float(item.get("historySamples") or 0) > 0)
                           for item in signals)
             evidence["liveHistoryCoverage"] = {
@@ -351,6 +427,13 @@ class Engine:
                     "directional": True,
                     "holdUntilResolution": True,
                     "maxPositionsPerContract": 1,
+                    "makerOrderType": "GTD_POST_ONLY",
+                    "makerEffectiveLifetimeSec": int(
+                        execution_cfg.get("maker_timeout_sec", 45)),
+                    "makerOnlyOutsideHours": float(
+                        execution_cfg.get("taker_window_hours", 2)),
+                    "takerFallback": "FOK",
+                    "terminalFillRequired": "CONFIRMED",
                 },
                 "redeemable": len(self.store.redeemable_positions()),
                 "pendingOrders": len(self.store.pending_orders()),
