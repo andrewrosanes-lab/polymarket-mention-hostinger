@@ -137,7 +137,7 @@ export default function Home(){
           <div className="strategyState"><span className={control.paused?"amber":"green"}>{control.paused?"PAUSED":"ARMED"}</span><small>Changes apply on the next scan</small></div>
           <Gauge label="Minimum confidence" value={control.minimumConfidence} min={50} max={100} suffix="%"/>
           <Gauge label="Timing confirmation" value={control.minTimingScore} min={0} max={100}/>
-          <div className="miniRules"><div><span>MODEL GAP</span><b>≥ 3 POINTS</b></div><div><span>PRICE RANGE</span><b>$0.19–$0.93</b></div><div><span>CONFIDENCE</span><b>65–93%</b></div><div><span>ENTRY WINDOW</span><b>≤ {control.maxHoursBeforeEvent}h</b></div><div><span>EXIT POLICY</span><b>MAKER PROFIT LOCK</b></div><div><span>TIER C</span><b>65–79 · $3</b></div></div>
+          <div className="miniRules"><div><span>MODEL GAP</span><b>≥ 3 POINTS</b></div><div><span>PRICE RANGE</span><b>$0.19–$0.93</b></div><div><span>CONFIDENCE</span><b>65–93%</b></div><div><span>PROFIT LOCK</span><b>ENTRIES &lt; $0.45</b></div><div><span>$0.45–$0.93</span><b>HOLD TO RESOLVE</b></div><div><span>TIER C</span><b>65–79 · $3</b></div></div>
         </article>
 
         <article className="panel evidenceCard">
