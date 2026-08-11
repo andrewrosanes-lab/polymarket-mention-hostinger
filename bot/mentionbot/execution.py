@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from math import floor
 
 from .models import BookSignal, Market
 
@@ -17,6 +19,31 @@ class Fill:
     price: float
     size_usd: float
     shares: float
+
+
+def taker_window_open(market: Market, execution_cfg: dict,
+                      now: datetime | None = None) -> bool:
+    """Allow aggressive execution only near or during the known event."""
+    if market.event_start is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    hours = (market.event_start - now).total_seconds() / 3600
+    return hours <= float(execution_cfg.get("taker_window_hours", 2))
+
+
+def capped_taker_price(book: BookSignal, model_probability: float,
+                       minimum_edge_pct: float, maximum_entry_price: float,
+                       tick_size: str, execution_cfg: dict) -> float:
+    """Return a tick-valid cap preserving slippage, model edge, and price limits."""
+    slippage = taker_slippage_bps(book, execution_cfg) / 10_000
+    raw_cap = min(
+        float(maximum_entry_price),
+        book.best_ask * (1 + slippage),
+        float(model_probability) - float(minimum_edge_pct) / 100,
+    )
+    tick = float(tick_size)
+    decimals = len(tick_size.partition(".")[2].rstrip("0"))
+    return round(max(0.0, floor((raw_cap + 1e-12) / tick) * tick), decimals)
 
 
 def _response_fill(result: dict, side: str, fallback_price: float) -> Fill:
@@ -40,7 +67,8 @@ class PaperExecutor:
 
     def buy(self, market: Market, side: str, usd: float, book: BookSignal,
             model_probability: float | None = None,
-            minimum_edge_pct: float = 0.0, on_submitted=None) -> Fill:
+            minimum_edge_pct: float = 0.0, on_submitted=None,
+            refresh_for_taker=None) -> Fill:
         price = maker_price(book, market.tick_size,
                             self.cfg["execution"]["price_buffer_ticks"])
         return Fill("paper-maker", price, usd, usd / price)
@@ -60,7 +88,7 @@ class LiveExecutor:
         try:
             from py_clob_client_v2 import (ApiCreds, ClobClient, MarketOrderArgs,
                 OrderArgs, OrderPayload, OrderType, PartialCreateOrderOptions,
-                Side, SignatureTypeV2)
+                Side, SignatureTypeV2, TradeParams)
         except ImportError as exc:
             raise RuntimeError("install py-clob-client-v2; legacy py-clob-client cannot trade CLOB V2") from exc
         creds = None
@@ -77,19 +105,62 @@ class LiveExecutor:
         self.client = ClobClient(**common)
         self.OrderArgs, self.MarketOrderArgs = OrderArgs, MarketOrderArgs
         self.OrderPayload, self.Options = OrderPayload, PartialCreateOrderOptions
-        self.OrderType, self.Side = OrderType, Side
+        self.OrderType, self.Side, self.TradeParams = OrderType, Side, TradeParams
+
+    def _wait_for_confirmation(self, trade_ids: list[str]) -> None:
+        """Return only after every associated trade reaches terminal success."""
+        ids = [str(item) for item in dict.fromkeys(trade_ids) if item]
+        if not ids:
+            raise RuntimeError("matched order omitted trade IDs; awaiting wallet reconciliation")
+        deadline = time.monotonic() + float(
+            self.cfg["execution"].get("trade_confirmation_timeout_sec", 45))
+        interval = max(1.0, float(
+            self.cfg["execution"].get("trade_confirmation_poll_sec", 2)))
+        while time.monotonic() < deadline:
+            statuses: dict[str, str] = {}
+            try:
+                for trade_id in ids:
+                    trades = self.client.get_trades(
+                        self.TradeParams(id=trade_id), only_first_page=True)
+                    for trade in trades:
+                        if str(trade.get("id")) == trade_id:
+                            statuses[trade_id] = str(
+                                trade.get("status") or "").upper()
+            except Exception:
+                # A transient CLOB read failure must not turn a MATCHED trade
+                # into either a false success or a retryable entry. Keep the
+                # reservation locked and continue checking until the deadline.
+                time.sleep(interval)
+                continue
+            if any(status == "FAILED" for status in statuses.values()):
+                raise DefinitelyNotFilled("matched trade failed permanently")
+            if all(statuses.get(trade_id) == "CONFIRMED" for trade_id in ids):
+                return
+            time.sleep(interval)
+        raise RuntimeError("trade finality is still pending; retaining entry lock")
+
+    def _confirm_response(self, result: dict) -> None:
+        trade_ids = result.get("tradeIDs") or result.get("trade_ids") or []
+        self._wait_for_confirmation(list(trade_ids))
 
     def buy(self, market: Market, side: str, usd: float, book: BookSignal,
             model_probability: float | None = None,
-            minimum_edge_pct: float = 0.0, on_submitted=None) -> Fill:
+            minimum_edge_pct: float = 0.0, on_submitted=None,
+            refresh_for_taker=None) -> Fill:
         token = market.yes_token if side == "YES" else market.no_token
+        execution_cfg = self.cfg["execution"]
         price = maker_price(book, market.tick_size,
-                            self.cfg["execution"]["price_buffer_ticks"])
+                            execution_cfg["price_buffer_ticks"])
         shares = usd / price
+        maker_lifetime = int(execution_cfg.get("maker_timeout_sec", 45))
+        # Polymarket requires a 60-second security threshold in addition to
+        # the desired effective GTD lifetime.
+        expiration = int(time.time()) + 60 + maker_lifetime
         result = self.client.create_and_post_order(
-            order_args=self.OrderArgs(token_id=token, price=price, size=shares, side=self.Side.BUY),
+            order_args=self.OrderArgs(token_id=token, price=price, size=shares,
+                side=self.Side.BUY, expiration=expiration),
             options=self.Options(tick_size=market.tick_size, neg_risk=market.neg_risk),
-            order_type=self.OrderType.GTC,
+            order_type=self.OrderType.GTD,
             post_only=True,
         )
         order_id = result.get("orderID") if isinstance(result, dict) else getattr(result, "order_id", None)
@@ -97,16 +168,18 @@ class LiveExecutor:
         if order_id and on_submitted:
             on_submitted(str(order_id), str(status or "submitted"))
         if status.lower() == "matched":
+            self._confirm_response(result)
             return _response_fill(result, "BUY", price)
         if not order_id:
             raise DefinitelyNotFilled(f"maker order rejected: {result}")
 
-        deadline = time.monotonic() + self.cfg["execution"]["maker_timeout_sec"]
+        deadline = time.monotonic() + maker_lifetime
         while time.monotonic() < deadline:
-            time.sleep(self.cfg["execution"]["maker_poll_sec"])
+            time.sleep(execution_cfg["maker_poll_sec"])
             order = self.client.get_order(order_id)
             matched = float(order.get("size_matched") or 0)
             if matched >= shares * 0.999:
+                self._wait_for_confirmation(order.get("associate_trades") or [])
                 return Fill(order_id, price, matched * price, matched)
 
         # Cancel first, then re-read the final matched amount. This closes the
@@ -118,19 +191,29 @@ class LiveExecutor:
         if matched > 0:
             # Do not submit a second leg after a partial maker fill; reconcile
             # only the confirmed maker shares to prevent accidental oversizing.
+            self._wait_for_confirmation(order.get("associate_trades") or [])
             return Fill(order_id, price, matched * price, matched)
 
-        slippage_bps = taker_slippage_bps(book, self.cfg["execution"])
-        max_price = min(0.99, book.best_ask * (1 + slippage_bps / 10_000))
-        if (model_probability is not None and
-                (float(model_probability) - max_price) * 100 < minimum_edge_pct):
+        if not taker_window_open(market, execution_cfg):
+            raise DefinitelyNotFilled(
+                "maker expired outside two-hour taker window")
+        if refresh_for_taker is None:
+            raise DefinitelyNotFilled("fresh taker re-evaluation unavailable")
+        book, model_probability = refresh_for_taker()
+        if book.ask_depth + 1e-9 < usd:
+            raise DefinitelyNotFilled("taker fallback lacks full displayed ask depth")
+        max_price = capped_taker_price(
+            book, float(model_probability), minimum_edge_pct,
+            float(self.cfg["risk"]["max_entry_price"]), market.tick_size,
+            execution_cfg)
+        if max_price + 1e-9 < book.best_ask:
             raise DefinitelyNotFilled(
                 "taker fallback cancelled: slippage erased the required model edge")
         taker = self.client.create_and_post_market_order(
             order_args=self.MarketOrderArgs(token_id=token, amount=usd,
-                side=self.Side.BUY, price=max_price, order_type=self.OrderType.FAK),
+                side=self.Side.BUY, price=max_price, order_type=self.OrderType.FOK),
             options=self.Options(tick_size=market.tick_size, neg_risk=market.neg_risk),
-            order_type=self.OrderType.FAK,
+            order_type=self.OrderType.FOK,
         )
         taker_id = (taker.get("orderID") or taker.get("order_id")) \
             if isinstance(taker, dict) else getattr(taker, "order_id", None)
@@ -138,6 +221,9 @@ class LiveExecutor:
             else getattr(taker, "status", "")
         if taker_id and on_submitted:
             on_submitted(str(taker_id), str(taker_status or "submitted"))
+        if not taker_id and taker_status.lower() != "matched":
+            raise DefinitelyNotFilled(f"FOK taker was not filled: {taker}")
+        self._confirm_response(taker)
         return _response_fill(taker, "BUY", book.best_ask)
 
     def sell(self, token_id: str, shares: float, price: float, tick_size: str,
