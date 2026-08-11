@@ -137,7 +137,7 @@ export default function Home(){
           <div className="strategyState"><span className={control.paused?"amber":"green"}>{control.paused?"PAUSED":"ARMED"}</span><small>Changes apply on the next scan</small></div>
           <Gauge label="Minimum confidence" value={control.minimumConfidence} min={50} max={100} suffix="%"/>
           <Gauge label="Timing confirmation" value={control.minTimingScore} min={0} max={100}/>
-          <div className="miniRules"><div><span>MODEL GAP</span><b>≥ 3 POINTS</b></div><div><span>PRICE RANGE</span><b>$0.19–$0.93</b></div><div><span>ENTRY WINDOW</span><b>≤ {control.maxHoursBeforeEvent}h</b></div><div><span>WORD LIMIT</span><b>1 / UTC DAY</b></div><div><span>EXIT POLICY</span><b>HOLD TO RESOLVE</b></div><div><span>TIER C</span><b>70–79 · $3</b></div></div>
+          <div className="miniRules"><div><span>MODEL GAP</span><b>≥ 3 POINTS</b></div><div><span>PRICE RANGE</span><b>$0.19–$0.93</b></div><div><span>ENTRY WINDOW</span><b>≤ {control.maxHoursBeforeEvent}h</b></div><div><span>WORD LIMIT</span><b>1 / UTC DAY</b></div><div><span>EXIT POLICY</span><b>MAKER PROFIT LOCK</b></div><div><span>TIER C</span><b>70–79 · $3</b></div></div>
         </article>
 
         <article className="panel evidenceCard">
@@ -149,7 +149,7 @@ export default function Home(){
 
     <section className="system panel" id="system">
       <div><p className="eyebrow">SYSTEM MAP</p><h2>From evidence to execution</h2><p>Directional probability and execution quality stay separate so book conditions cannot manufacture outcome certainty.</p></div>
-      <div className="routeFlow"><RouteStep number="01" title="Estimate" text="Historical context + market prior"/><i>→</i><RouteStep number="02" title="Confirm" text="Persistent order-book pressure"/><i>→</i><RouteStep number="03" title="Gate" text="Confidence + capacity + daily/condition locks"/><i>→</i><RouteStep number="04" title="Hold" text="Maker first, then hold through resolution"/></div>
+      <div className="routeFlow"><RouteStep number="01" title="Estimate" text="Historical context + market prior"/><i>→</i><RouteStep number="02" title="Confirm" text="Persistent order-book pressure"/><i>→</i><RouteStep number="03" title="Gate" text="Confidence + capacity + daily/condition locks"/><i>→</i><RouteStep number="04" title="Protect" text="Maker-only staged profit lock; otherwise resolve"/></div>
       <div className="tagRail">{tags.map(([id,name])=><span key={id}><b>{name}</b><small>#{id} · verified</small></span>)}</div>
     </section>
 
