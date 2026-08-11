@@ -12,6 +12,7 @@ from mentionbot.config import _validate
 from mentionbot.engine import Engine
 from mentionbot.execution import (DefinitelyNotFilled, LiveExecutor,
                                   _response_fill, capped_taker_price,
+                                  maker_sell_price, profit_lock_floor,
                                   taker_window_open)
 from mentionbot.microstructure import calculate_signal
 from mentionbot.models import BookSignal, Market, MicrostructureSignal, Score
@@ -37,6 +38,7 @@ def test_production_option_c_limits_are_locked(monkeypatch):
     assert cfg["tiers"][0]["min_confidence"] == 70
     assert cfg["risk"]["min_entry_price"] == .19
     assert cfg["risk"]["max_entry_price"] == .93
+    assert cfg["execution"]["profit_lock"]["maker_only"] is True
 
     too_cheap = deepcopy(cfg)
     too_cheap["risk"]["min_entry_price"] = .18
@@ -47,6 +49,51 @@ def test_production_option_c_limits_are_locked(monkeypatch):
     too_lenient["minimum_confidence"] = 69
     with pytest.raises(ValueError, match="at least 70"):
         _validate(too_lenient)
+
+
+def test_staged_profit_floor_never_creates_a_loss_exit():
+    stages = [
+        {"trigger_gain_pct": 50, "lock_gain_pct": 0},
+        {"trigger_gain_pct": 100, "lock_gain_pct": 50},
+        {"trigger_gain_pct": 200, "lock_gain_pct": 100},
+    ]
+    assert profit_lock_floor(.20, .29, stages) is None
+    assert profit_lock_floor(.20, .30, stages) == pytest.approx(.20)
+    assert profit_lock_floor(.20, .40, stages) == pytest.approx(.30)
+    assert profit_lock_floor(.20, .60, stages) == pytest.approx(.40)
+
+
+def test_profit_exit_is_post_only_gtd_and_never_falls_back_to_taker():
+    calls = {"maker": None, "cancel": 0, "taker": 0}
+
+    class Client:
+        def create_and_post_order(self, **kwargs):
+            calls["maker"] = kwargs
+            return {"orderID": "exit", "status": "live"}
+        def get_order(self, order_id):
+            return {"size_matched": "0", "associate_trades": []}
+        def cancel_order(self, payload):
+            calls["cancel"] += 1
+        def create_and_post_market_order(self, **kwargs):
+            calls["taker"] += 1
+            pytest.fail("profit exit must never use a taker order")
+
+    executor = LiveExecutor.__new__(LiveExecutor)
+    executor.cfg = {"execution": {"profit_lock": {"maker_timeout_sec": 0},
+                                   "maker_poll_sec": 0}}
+    executor.client = Client()
+    executor.OrderArgs = lambda **kwargs: kwargs
+    executor.OrderPayload = lambda **kwargs: kwargs
+    executor.Options = lambda **kwargs: kwargs
+    executor.Side = type("Side", (), {"SELL": "SELL"})
+    executor.OrderType = type("OrderType", (), {"GTD": "GTD"})
+    book = BookSignal(50, .29, .31, 2, 100, 100)
+    assert maker_sell_price(book, .30, "0.01") == .30
+    with pytest.raises(DefinitelyNotFilled, match="no taker used"):
+        executor.sell_maker("token", 10, book, .30, "0.01", False)
+    assert calls["maker"]["post_only"] is True
+    assert calls["maker"]["order_type"] == "GTD"
+    assert calls["cancel"] == 1 and calls["taker"] == 0
 
 
 def test_confirmed_buy_and_sell_amounts():
