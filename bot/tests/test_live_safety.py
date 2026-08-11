@@ -40,6 +40,7 @@ def test_production_option_c_limits_are_locked(monkeypatch):
     assert cfg["tiers"][-1]["max_confidence"] == 93
     assert cfg["risk"]["min_entry_price"] == .19
     assert cfg["risk"]["max_entry_price"] == .93
+    assert "minimum_independent_samples" not in cfg["risk"]
     assert cfg["execution"]["profit_lock"]["maker_only"] is True
     assert cfg["execution"]["profit_lock"]["max_entry_price_exclusive"] == .45
 
@@ -906,6 +907,31 @@ def test_risk_does_not_reject_wide_spread():
         0, 0, False, "0.01", "Trump", "word", "speech")
     score = Score(75, 75, "YES", "C", 3, 50, 50, 50, 50, 10, "")
     book = BookSignal(50, .16, .40, 150, 100, 100)
+    assert engine.risk_ok(market, score, book) == (True, "ok")
+
+
+def test_warming_microstructure_is_diagnostic_not_an_entry_blocker():
+    engine = Engine.__new__(Engine)
+    engine.cfg = {
+        "microstructure": {"enabled": True, "absorption_veto": True},
+        "risk": {"kill_switch_file": "/never", "max_open_positions": 5,
+                 "min_liquidity_usd": 0, "min_volume_usd": 0,
+                 "min_timing_score": 0, "require_known_event_start": False,
+                 "max_hours_before_event": 24, "min_entry_price": .19,
+                 "max_entry_price": .93, "min_model_mispricing_pct": 3,
+                 "max_positions_per_condition": 1},
+    }
+    engine.store = type("S", (), {
+        "open_positions": lambda self: [],
+        "entry_allowed": lambda self, c, s, p: (True, "ok"),
+    })()
+    market = Market("c", "q", "e", "s", "es", None,
+        datetime.now(timezone.utc) + timedelta(hours=3), "y", "n", .5, .5,
+        0, 0, False, "0.01", "Trump", "word", "speech")
+    score = Score(75, 75, "YES", "C", 3, 50, 50, 50, 0, 35, "",
+                  independent_probability=75,
+                  microstructure_ready=False, absorption=False)
+    book = BookSignal(50, .39, .40, 2, 100, 100)
     assert engine.risk_ok(market, score, book) == (True, "ok")
 
 

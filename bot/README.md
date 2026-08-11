@@ -18,8 +18,9 @@ with the weather bot.
 The independent historical/context model selects YES or NO. Final Option C
 confidence must be 65–93, while the independent model must exceed the actual
 maker price or worst FOK price by at least three points. Scores in the middle,
-microstructure windows without at least 20 seconds of persistent snapshots and
-executed flow, and absorption signals do not trade.
+and absorption signals do not trade. Missing mention history and a
+microstructure window that is still warming remain neutral diagnostics; neither
+is an entry blocker.
 
 | Tier | Confidence | Position |
 |---|---:|---:|
