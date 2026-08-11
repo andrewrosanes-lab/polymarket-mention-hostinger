@@ -15,6 +15,23 @@ timing_weights:
   order_book_imbalance: 0.20
   momentum: 0.14
 
+# Option C final-confidence weights. Direction and the three-point mispricing
+# gate remain anchored to the independent historical/context model.
+option_c_confidence_weights:
+  historical_mentions: 0.30
+  event_context: 0.20
+  market_prior: 0.15
+  microstructure: 0.25
+  momentum: 0.10
+
+microstructure:
+  enabled: true
+  websocket_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+  minimum_persistence_sec: 20
+  minimum_snapshots: 3
+  minimum_trades: 1
+  absorption_veto: true
+
 # Book pressure confirms a model signal; it never selects the direction. Three
 # consecutive samples are required and confidence can move at most five points.
 book_confidence:
@@ -91,6 +108,8 @@ risk:
   min_liquidity_usd: 0
   min_volume_usd: 0
   max_spread_pct: 100
+  min_model_mispricing_pct: 3
+  minimum_independent_samples: 5
   min_timing_score: 0
   max_hours_before_event: 24
   require_known_event_start: true
