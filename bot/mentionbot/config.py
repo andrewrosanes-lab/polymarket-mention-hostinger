@@ -22,14 +22,16 @@ def _validate(cfg: dict) -> None:
         weights = cfg.get(group) or {}
         if not weights or any(float(value) <= 0 for value in weights.values()):
             raise ValueError(f"{group} must contain positive weights")
-    if float(cfg["minimum_confidence"]) < 70:
-        raise ValueError("Option C minimum_confidence must be at least 70")
+    if float(cfg["minimum_confidence"]) != 65:
+        raise ValueError("Option C minimum_confidence must remain 65")
     tiers = sorted(cfg["tiers"], key=lambda x: x["min_confidence"])
     for tier in tiers:
         if tier["min_confidence"] >= tier["max_confidence"]:
             raise ValueError(f"invalid tier {tier['name']}")
-    if float(tiers[0]["min_confidence"]) != 70:
-        raise ValueError("Option C Tier C must begin at 70 confidence")
+    if float(tiers[0]["min_confidence"]) != 65:
+        raise ValueError("Option C Tier C must begin at 65 confidence")
+    if float(tiers[-1]["max_confidence"]) != 93:
+        raise ValueError("Option C confidence must stop at 93")
     risk = cfg.get("risk") or {}
     if int(risk.get("max_positions_per_condition", 1)) != 1:
         raise ValueError("max_positions_per_condition must remain 1")
