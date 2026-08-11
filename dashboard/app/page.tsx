@@ -25,7 +25,7 @@ type Status = {
 };
 
 const defaultControl:Control = {
-  paused:false, minimumConfidence:70,
+  paused:false, minimumConfidence:65,
   minTimingScore:0, maxHoursBeforeEvent:24,
 };
 const tags = [["105481","Trump speech"],["105482","Politics"],["105486","NFL"],["100343","Mentions"]];
@@ -137,7 +137,7 @@ export default function Home(){
           <div className="strategyState"><span className={control.paused?"amber":"green"}>{control.paused?"PAUSED":"ARMED"}</span><small>Changes apply on the next scan</small></div>
           <Gauge label="Minimum confidence" value={control.minimumConfidence} min={50} max={100} suffix="%"/>
           <Gauge label="Timing confirmation" value={control.minTimingScore} min={0} max={100}/>
-          <div className="miniRules"><div><span>MODEL GAP</span><b>≥ 3 POINTS</b></div><div><span>PRICE RANGE</span><b>$0.19–$0.93</b></div><div><span>ENTRY WINDOW</span><b>≤ {control.maxHoursBeforeEvent}h</b></div><div><span>WORD LIMIT</span><b>1 / UTC DAY</b></div><div><span>EXIT POLICY</span><b>MAKER PROFIT LOCK</b></div><div><span>TIER C</span><b>70–79 · $3</b></div></div>
+          <div className="miniRules"><div><span>MODEL GAP</span><b>≥ 3 POINTS</b></div><div><span>PRICE RANGE</span><b>$0.19–$0.93</b></div><div><span>CONFIDENCE</span><b>65–93%</b></div><div><span>ENTRY WINDOW</span><b>≤ {control.maxHoursBeforeEvent}h</b></div><div><span>EXIT POLICY</span><b>MAKER PROFIT LOCK</b></div><div><span>TIER C</span><b>65–79 · $3</b></div></div>
         </article>
 
         <article className="panel evidenceCard">
@@ -160,7 +160,7 @@ export default function Home(){
         <div className="modalHead"><div><p className="eyebrow">AUTHENTICATED CONTROLS</p><h2 id="control-title">Strategy control room</h2><p>Only whitelisted guardrails can change. Wallet credentials are never available here.</p></div><button onClick={()=>setControlOpen(false)} aria-label="Close control room">×</button></div>
         {!controlConfigured&&<div className="warning"><b>Admin controls are not configured.</b><span>Add a 24+ character DASHBOARD_ADMIN_TOKEN to the VPS environment, then rebuild the dashboard.</span></div>}
         <div className="controlGrid">
-          <ControlRange label="Minimum confidence" help="Tier C cannot go below 70%." value={control.minimumConfidence} min={70} max={90} step={1} suffix="%" onChange={value=>setControl({...control,minimumConfidence:value})}/>
+          <ControlRange label="Minimum confidence" help="Tier C cannot go below 65%; confidence above 93% is rejected." value={control.minimumConfidence} min={65} max={90} step={1} suffix="%" onChange={value=>setControl({...control,minimumConfidence:value})}/>
           <ControlRange label="Timing confirmation" help="Higher values demand stronger book and momentum agreement." value={control.minTimingScore} min={0} max={90} step={1} onChange={value=>setControl({...control,minTimingScore:value})}/>
           <ControlRange label="Entry window" help="How close the verified event start must be." value={control.maxHoursBeforeEvent} min={1} max={24} step={0.5} suffix="h" onChange={value=>setControl({...control,maxHoursBeforeEvent:value})}/>
         </div>
