@@ -49,6 +49,8 @@ def _validate(cfg: dict) -> None:
     profit_lock = execution.get("profit_lock") or {}
     if not profit_lock.get("enabled") or not profit_lock.get("maker_only"):
         raise ValueError("staged profit protection must remain maker-only")
+    if float(profit_lock.get("max_entry_price_exclusive", 0)) != .45:
+        raise ValueError("profit lock must apply only below a 0.45 entry price")
     stages = [
         (float(item.get("trigger_gain_pct", -1)),
          float(item.get("lock_gain_pct", -1)))
