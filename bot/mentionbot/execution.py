@@ -59,6 +59,13 @@ def profit_lock_floor(entry_price: float, peak_price: float,
     return min(.99, entry * (1 + max(armed) / 100))
 
 
+def profit_lock_eligible(entry_price: float, profit_cfg: dict) -> bool:
+    """Apply staged exits only to low-price entries below the configured cap."""
+    return (bool(profit_cfg.get("enabled"))
+            and float(entry_price) < float(
+                profit_cfg.get("max_entry_price_exclusive", .45)))
+
+
 def maker_sell_price(book: BookSignal, minimum_price: float,
                      tick_size: str) -> float:
     """Choose a post-only sell price that never falls below the armed floor."""
